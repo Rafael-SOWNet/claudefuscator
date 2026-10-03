@@ -68,6 +68,11 @@ protects non-Claude-Code API clients and carries the local-model fallback.
 
 ### Proxy mode
 
+> Part of `proxy/` is vendored from `local-ai-proxy`, by the same author and
+> also MIT. `proxy/NOTICE` records which files came from where, because
+> `tools/patch-proxy.py` can replace a vendored file wholesale and cannot
+> replace one of ours.
+
 > **Kept for reference; not the path to start on.** The proxy existed
 > because it was the only mode that could reach a typed prompt, `CLAUDE.md`
 > and compaction. Mod mode now reaches the first two and compaction was

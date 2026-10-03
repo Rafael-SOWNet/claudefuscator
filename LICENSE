@@ -2,6 +2,10 @@ MIT License
 
 Copyright (c) 2026 Rafael Vuijk
 
+Covers everything in this repository, including the files in proxy/
+vendored from "local-ai-proxy" — same author, same licence. proxy/NOTICE
+records which files came from where.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

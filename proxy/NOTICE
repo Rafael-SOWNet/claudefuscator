@@ -1,0 +1,48 @@
+Provenance of the files in proxy/
+=================================
+
+This directory mixes code written for Claudefuscator with a vendored copy
+of a separate project, "local-ai-proxy", by the same author and under the
+same licence. Both are MIT, Copyright (c) 2026 Rafael Vuijk, so the root
+LICENSE covers everything here.
+
+This file exists anyway, because "same author, same licence" is the kind of
+fact that is obvious to the person who knows it and invisible to everyone
+else. Vendored code with no licence header invites exactly one question,
+and answering it in advance is cheaper than answering it repeatedly.
+
+CLAUDEFUSCATOR'S OWN FILES
+
+    claudefuscator_core.py      hand-port of the canonical tokenizer
+    veil.py                     scrub outbound, restore inbound
+    config_merge.py             mirror of shared/config-merge.js
+    start-proxy.ps1
+    tests/test_parity.py        asserts the port matches the vectors
+    tests/test_veil.py
+    tests/test_merge_parity.py
+
+VENDORED FROM local-ai-proxy
+
+    detect.py  sse.py  local_request.py
+    rules.toml  test_rules.toml
+    start-claude.ps1
+    __init__.py  tests/__init__.py  tests/conftest.py
+    tests/test_detect.py  tests/test_local_request.py  tests/test_sse.py
+
+VENDORED AND THEN MODIFIED HERE
+
+    lite_llm_proxy.py           upstream, with the veil hooks added by
+                                tools/patch-proxy.py
+    tests/test_proxy_integration.py
+
+Keeping the split visible matters for a practical reason rather than a
+legal one: `tools/patch-proxy.py` reapplies the hooks, so a file in the
+vendored list can be replaced wholesale from upstream, and a file in the
+first list cannot.
+
+WHY THIS DIRECTORY IS STILL HERE
+
+Proxy mode is no longer the recommended path — see PROXY-NOTES.md — but it
+remains the only way to measure what another mode actually emitted, which
+is how mod mode was verified. Deleting it would remove the only instrument
+that can audit the thing most people will rely on.
