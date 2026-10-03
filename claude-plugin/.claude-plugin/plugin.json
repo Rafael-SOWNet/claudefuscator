@@ -1,0 +1,25 @@
+{
+  "name": "claudefuscator",
+  "displayName": "Claudefuscator",
+  "version": "0.1.0",
+  "description": "Replaces configured incidental identifiers in tool output with stable tokens before they reach Anthropic, and restores them on screen locally.",
+  "author": {
+    "name": "Rafael Vuijk"
+  },
+  "license": "MIT",
+  "keywords": ["privacy", "redaction", "pseudonymization"],
+  "userConfig": {
+    "secret_key": {
+      "type": "string",
+      "title": "Claudefuscator key",
+      "description": "Shared secret used to derive tokens. Enter the SAME value in the Chrome extension options. Stored in your OS credential store, never written to settings.json, never sent anywhere.",
+      "sensitive": true,
+      "required": true
+    },
+    "config_path": {
+      "type": "file",
+      "title": "Identifier list",
+      "description": "Path to your claudefuscator.local.json (identifiers, internal domains, policy). Leave empty to search ./claudefuscator.local.json then ~/.claudefuscator/identifiers.json."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "packs": ["base-pack.json"],
+  "identifiers": [
+    { "type": "SITE", "value": "Plant One" }
+  ]
+}

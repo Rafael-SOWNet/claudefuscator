@@ -1,0 +1,10 @@
+{
+  "tokenLength": 8,
+  "internalDomains": ["corp.example"],
+  "packs": ["nested-pack.json"],
+  "allowList": ["kern", "post"],
+  "identifiers": [
+    { "type": "PERSON", "value": "Jane Example" },
+    { "type": "CUSTOMER", "value": "ExampleCorp", "aliases": ["Example Corp"] }
+  ]
+}

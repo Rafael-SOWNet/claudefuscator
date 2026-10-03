@@ -1,0 +1,22 @@
+[settings]
+listen_port = 8090
+holdback_chars = 300
+upstream_url = "https://api.anthropic.com"
+upstream_timeout_s = 600
+local_url = "http://127.0.0.1:9931"
+local_model = "qwen3-14b-local"
+local_max_tokens = 8192
+local_timeout_s = 600
+log_path = "logs/fallback.jsonl"
+
+[[rules]]
+name = "generic-decline"
+pattern = "((I\\s+)?(won't|can't|cannot|unable to|am not able to|declin(e|ing))|I'm not able to|I must decline)"
+
+[[rules]]
+name = "licensing"
+pattern = "(licen[cs]e|copyright|permission|terms of (use|service)).{0,120}(can't|cannot|won't|unable|not able)"
+
+[[rules]]
+name = "policy-refusal"
+pattern = "(rules?|policy|policies|guidelines?)\\s+(forbid|prohibit)s?|forbidden|not (permitted|allowed)|not (going to|gonna) do (this|that|it)|not \\w+ing (this|that|it|the)|I refuse|refus(e|ing) to"

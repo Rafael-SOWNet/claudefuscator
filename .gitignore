@@ -1,0 +1,77 @@
+# --- Claudefuscator secrets and real identifier values -----------------------
+# These hold the key or real identifiers in plaintext. Never commit them.
+# The pattern is deliberately broad: anything *.local.json, and any file whose
+# name contains "key" or "secret", is excluded by default.
+claudefuscator.local.json
+*.local.json
+.claudefuscator/
+claudefuscator.key
+*.key
+*.keyfile
+*secret*
+*.pem
+.env
+.env.*
+
+# Debug dumps from CLAUDEFUSCATOR_DUMP contain hook payloads, which for PostToolUse
+# means real identifier values.
+*.dump
+*.dump.jsonl
+claudefuscator-dump*
+
+# Discovered-value cache (cacheDiscovered: true) holds real values in plaintext.
+sessions/
+*.discovered.json
+
+# --- tooling -------------------------------------------------------------
+node_modules/
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Packed extension builds
+*.zip
+*.crx
+*.pem
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+
+# Agent worktrees, when an agent works on an isolated copy of the repo
+.worktrees/
+
+# --- explicit re-includes ------------------------------------------------
+# The example config must be committed; it contains no real values.
+!config/claudefuscator.example.json
+
+# Claudefuscator wire log (post-scrub, but a full copy of conversations)
+*.wire.jsonl
+wire-log*
+
+# Python bytecode and pytest artefacts
+__pycache__/
+*.pyc
+.pytest_cache/
+# Stray fixture written into CWD by the vendored local_request tests
+/proxy/test_rules.toml
+
+# Harvested / real vocabulary packs (contain real org terms)
+config/packs/*.local.json
+config/packs/harvested*.json
+
+# Type declarations the engine writes into a mod folder on load. Per-build,
+# 550K, regenerated on every load. The engine drops its own .gitignore in
+# there too; this is belt-and-braces in case it stops. The small tsconfig.json
+# that points at them IS committed.
+claude-mod/.claude-plugin/types/
+
+# The proxy fallback log holds request excerpts. PROXY-NOTES.md says never
+# commit it; it had no rule until now.
+proxy/logs/
+
+# The vault credential lives in the environment, never in a file here. This
+# is belt and braces for a local export script someone writes anyway.
+*vault-token*
+.env.vault

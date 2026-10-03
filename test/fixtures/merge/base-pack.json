@@ -1,0 +1,32 @@
+{
+  "identifiers": [
+    {
+      "type": "ORG",
+      "value": "ExampleCorp",
+      "aliases": [
+        "Example Corp"
+      ]
+    },
+    {
+      "type": "PRODUCT",
+      "value": "WIDGET-800"
+    },
+    {
+      "type": "PROCESS",
+      "value": "XYZ",
+      "caseSensitive": true
+    },
+    {
+      "type": "SYMBOL",
+      "value": "Acme",
+      "aliases": [
+        "ACME"
+      ],
+      "compound": true
+    },
+    {
+      "type": "PROCESS",
+      "value": "ABC"
+    }
+  ]
+}

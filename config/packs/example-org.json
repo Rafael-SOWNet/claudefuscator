@@ -1,0 +1,66 @@
+{
+  "//": [
+    "EXAMPLE pack - shape reference only, no real values. Committed.",
+    "",
+    "A pack is reusable vocabulary: the terms that are the same across every",
+    "project at one employer. Real packs go in config/packs/*.local.json,",
+    "which is gitignored, or are produced by tools/harvest-vocab.js.",
+    "",
+    "Reference packs from your claudefuscator.local.json:",
+    "    { \"packs\": [\"config/packs/mine.local.json\"], \"identifiers\": [...] }",
+    "Project identifiers are applied LAST, so they override a pack.",
+    "",
+    "THE THREE LAYERS",
+    "  generic      built-in regex patterns (email, privateIp, mac,",
+    "               internalHost). No vocabulary, applies anywhere.",
+    "  packs        this file - org/product/process vocabulary.",
+    "  identifiers  the project's own list. Wins over both.",
+    "  allowList    never-tokenize words. Wins over everything.",
+    "",
+    "COST OF OVER-TOKENIZING: every term you add is a term Claude can no",
+    "longer reason about. Tokenizing a whole domain vocabulary buys little",
+    "and costs a lot of answer quality. Add what is genuinely identifying."
+  ],
+
+  "identifiers": [
+    {
+      "//": "Plain org name. Case-insensitive, aliases collapse to one token.",
+      "type": "ORG",
+      "value": "ExampleCorp",
+      "aliases": ["Example Corp", "Example Corporation"]
+    },
+    {
+      "//": "Product / part code.",
+      "type": "PRODUCT",
+      "value": "WIDGET-800",
+      "aliases": ["WIDGET800"]
+    },
+    {
+      "//": [
+        "Process acronym. caseSensitive so the lowercase word is untouched -",
+        "short acronyms collide with ordinary words constantly.",
+        "Think twice: if Claude cannot see what process you mean, it cannot",
+        "help you with it."
+      ],
+      "type": "PROCESS",
+      "value": "XYZ",
+      "caseSensitive": true
+    },
+    {
+      "//": [
+        "compound: matches INSIDE a code identifier, so ExampleCorp hits in",
+        "ExampleCorpClient and EXAMPLECORP_TIMEOUT.",
+        "compound implies caseSensitive, and each spelling gets its OWN token,",
+        "so code round-trips byte-exact instead of being case-folded.",
+        "List every spelling you want matched - unlisted ones are left alone.",
+        "",
+        "This renames a LABEL inside code. It does NOT hide what the code",
+        "does; see CLAUDE.md on the scope boundary."
+      ],
+      "type": "SYMBOL",
+      "value": "Acme",
+      "aliases": ["ACME", "acme"],
+      "compound": true
+    }
+  ]
+}

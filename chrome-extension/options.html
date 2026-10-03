@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Claudefuscator options</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <h1>Claudefuscator</h1>
+    <p class="lede">
+      Restores Claudefuscator tokens to their real values in the claude.ai page.
+      Everything below is stored in <code>chrome.storage.local</code> on this
+      machine only &mdash; it is not synced to your Google account and it is
+      never transmitted.
+    </p>
+
+    <section>
+      <h2>Key</h2>
+      <p class="help">
+        Must be byte-for-byte the same value you entered on the Claude Code
+        side. Enter it here independently; do not paste it into a chat, a
+        commit, or a file in the repo.
+      </p>
+      <label class="field">
+        <span>Shared key</span>
+        <input type="password" id="key" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="reveal"> Show key
+      </label>
+      <p class="help" id="keyState" aria-live="polite"></p>
+    </section>
+
+    <section>
+      <h2>Identifier list</h2>
+      <p class="help">
+        Paste the contents of your <code>claudefuscator.local.json</code>. The
+        extension recomputes the same tokens from these values, which is how it
+        restores them without any mapping ever being transmitted.
+      </p>
+      <p class="warn">
+        This stores your real identifier values in the Chrome profile on this
+        machine. Values not in this list can still be tokenized by a pattern on
+        the Claude Code side, but cannot be restored here &mdash; only in the
+        terminal.
+      </p>
+      <label class="field">
+        <span>Config JSON</span>
+        <textarea id="config" rows="18" spellcheck="false"
+                  placeholder='{ "internalDomains": ["example.com"], "identifiers": [ { "type": "PERSON", "value": "Jane Example" } ] }'></textarea>
+      </label>
+    </section>
+
+    <section>
+      <h2>Display</h2>
+      <p class="help">
+        Marks restored values on the page with a faint wash and a dotted
+        underline, so you can see at a glance what came back from a token and
+        what was always there. Painted with the CSS Custom Highlight API, so
+        nothing in the page's structure changes.
+      </p>
+      <label class="checkbox">
+        <input type="checkbox" id="highlight" checked> Mark unveiled values
+      </label>
+      <p class="help">Toggle on any claude.ai tab with <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd>.</p>
+    </section>
+
+    <div class="actions">
+      <button id="save" type="button">Save</button>
+      <button id="test" type="button" class="secondary">Test</button>
+      <button id="clear" type="button" class="danger">Erase stored data</button>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+
+    <section id="testOut" hidden>
+      <h2>Test</h2>
+      <p class="help">
+        Derives the tokens for your list entries locally, so you can check they
+        match what the Claude Code side produced for the same key. Real values
+        are shown here because they are already on this page.
+      </p>
+      <table id="testTable">
+        <thead><tr><th>Type</th><th>Real value</th><th>Token</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="claudefuscator-core.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

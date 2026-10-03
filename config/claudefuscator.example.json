@@ -1,0 +1,122 @@
+{
+  "//": [
+    "Copy to claudefuscator.local.json (gitignored) and edit. This file holds REAL",
+    "identifier values in plaintext, which is why the real one is never",
+    "committed. The KEY does not belong in here - it goes in the plugin's",
+    "/config prompt (OS credential store) or the CLAUDEFUSCATOR_KEY env var.",
+    "",
+    "The Chrome extension needs the SAME identifiers list, because tokens are",
+    "one-way HMACs: the extension restores a token by recomputing the HMAC over",
+    "the values it knows. Paste this file's contents into the extension options",
+    "page. Anything NOT in this list can still be tokenized by a pattern, but",
+    "the extension cannot restore it - only the terminal side can."
+  ],
+
+  "//projects": [
+    "Where Claudefuscator is allowed to act. A list of directory paths; the",
+    "session must be inside one of them or the mod/plugin loads INACTIVE and",
+    "says so. Absent or empty means every project.",
+    "",
+    "This lives in the config rather than in per-project settings because a",
+    "mod can be loaded globally (CLAUDE_CODE_PLUGIN_DIRS, or installing it),",
+    "and config hygiene slips. Gating here means that even when it IS loaded",
+    "everywhere, it only acts where you said.",
+    "",
+    "A path matches itself and anything inside it. `~/git/acme` does NOT match",
+    "`~/git/acme-old`. Windows paths are compared case-insensitively.",
+    "Not applied to the proxy, which you start explicitly per session."
+  ],
+  "projects": [],
+
+  "tokenLength": 8,
+
+  "//promptPolicy": "warn = a typed identifier IS sent, you just get told. block = prompt rejected before the model sees it.",
+  "promptPolicy": "warn",
+
+  "//onError": "block = a tool result we failed to scrub is withheld from the model (fail closed). passthrough = sent unscrubbed.",
+  "onError": "block",
+
+  "//restoreToolInput": "Rewrites tokens back to real values in tool ARGUMENTS so local tools work. See TESTING.md check 4 before trusting it.",
+  "restoreToolInput": true,
+
+  "//cacheDiscovered": "Persists pattern-matched values (IPs, MACs) so they can be restored in the terminal. WRITES REAL VALUES TO DISK IN PLAINTEXT. Off by default.",
+  "cacheDiscovered": false,
+
+  "//packs": [
+    "Reusable vocabulary layers, applied BEFORE the identifiers below so your",
+    "project list can override them. Real packs go in config/packs/*.local.json",
+    "(gitignored); tools/harvest-vocab.js can propose one from your repos",
+    "without ever printing the terms. See config/packs/example-org.json."
+  ],
+  "packs": [],
+
+  "//allowList": [
+    "Never tokenize these, whatever matched them - the safety valve for an",
+    "over-eager personal filter. Wins over patterns AND identifiers.",
+    "Paste in config/allowlist-nl-en.json's list, or reference it as a pack."
+  ],
+  "allowList": [],
+
+  "//internalDomains": "Any hostname ending in one of these is tokenized automatically.",
+  "internalDomains": [
+    "corp.example",
+    "lan",
+    "internal"
+  ],
+
+  "//patterns": "Built-in high-precision matchers. No person-name detection by design - names go in identifiers below.",
+  "patterns": {
+    "email": true,
+    "privateIp": true,
+    "mac": true,
+    "internalHost": true
+  },
+
+  "//identifiers": [
+    "type is a free label and becomes the token prefix.",
+    "aliases normally collapse onto the SAME token as value, so restore emits",
+    "value rather than the alias - value-preserving, not byte-preserving.",
+    "",
+    "caseSensitive: match only this exact casing, and give each spelling its",
+    "own token. Use for short acronyms so the lowercase word is left alone.",
+    "",
+    "compound: also match INSIDE code identifiers (Acme -> AcmeClient).",
+    "Implies caseSensitive and per-spelling tokens, so code round-trips",
+    "byte-exact instead of being case-folded into a different symbol. List",
+    "every spelling you want hit; unlisted ones are left alone.",
+    "This renames a LABEL in code - it does not hide what the code does."
+  ],
+  "identifiers": [
+    {
+      "type": "PERSON",
+      "value": "Jane Example",
+      "aliases": ["J. Example", "jexample", "jane.example"]
+    },
+    {
+      "type": "HOST",
+      "value": "build-01.corp.example"
+    },
+    {
+      "type": "ORG",
+      "value": "Example Customer B.V.",
+      "aliases": ["Example Customer"]
+    },
+    {
+      "type": "SERIAL",
+      "value": "DEV-100-000123"
+    },
+    {
+      "//": "Short acronym: exact case only, or every lowercase use gets hit.",
+      "type": "PROCESS",
+      "value": "XYZ",
+      "caseSensitive": true
+    },
+    {
+      "//": "Company name that also appears inside C#/TS symbol names.",
+      "type": "ORG",
+      "value": "Acme",
+      "aliases": ["ACME", "acme"],
+      "compound": true
+    }
+  ]
+}

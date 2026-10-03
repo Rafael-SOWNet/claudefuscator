@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Claudefuscator E2E fixture</title>
+</head>
+<body>
+  <!--
+    Reproduces the claude.ai DOM shapes the content script has to cope with.
+    Served by e2e/run-extension-e2e.js, which substitutes {{...}} with tokens
+    derived from the real core, so the extension is restoring genuine tokens
+    and not hand-written lookalikes.
+  -->
+
+  <h1>Conversation</h1>
+
+  <!-- 1. Static assistant text: must be restored. -->
+  <div id="transcript">
+    <p id="msg-1">The host {{HOST_TOKEN}} is unreachable; {{PERSON_TOKEN}} owns it.</p>
+  </div>
+
+  <!-- 2. Text that merely looks like a token: must NOT be touched. -->
+  <p id="lookalike">const MAX_deadbeef = 1; HOST_zzzzzzzz; PERSON_00000000</p>
+
+  <!-- Pattern hits: on no list, so only the agent can resolve them. The
+       second is served by the agent with a value that does NOT hash back
+       to it, and must stay unresolved. -->
+  <p id="frompattern">the box at {{IP_TOKEN}} is down</p>
+  <p id="poisoned">also {{POISON_TOKEN}} reported</p>
+
+  <!-- 3. Editable surfaces: must NEVER be rewritten. Restoring here would put
+       the real value into what the user is about to send. -->
+  <div id="composer" contenteditable="true">ssh {{HOST_TOKEN}}</div>
+  <textarea id="ta">ssh {{HOST_TOKEN}}</textarea>
+  <input id="inp" value="{{HOST_TOKEN}}">
+  <div id="rolebox" role="textbox">{{PERSON_TOKEN}}</div>
+  <div id="nested-editable" contenteditable="true">
+    <span><b id="deep">{{HOST_TOKEN}}</b></span>
+  </div>
+
+  <!-- 4. Streaming region: text appended and mutated after load, the way an
+       assistant message streams in. Exercises the MutationObserver. -->
+  <div id="stream"></div>
+
+  <!-- 5. Artifact: a sandboxed iframe with an opaque origin, which is why the
+       manifest needs match_origin_as_fallback. Updated in place afterwards to
+       mimic an artifact being revised. -->
+  <iframe id="artifact" sandbox="allow-scripts" srcdoc="
+    &lt;!doctype html&gt;&lt;body&gt;
+      &lt;p id=&quot;art&quot;&gt;Deploy target: {{HOST_TOKEN}}&lt;/p&gt;
+      &lt;div id=&quot;artstream&quot;&gt;&lt;/div&gt;
+      &lt;script&gt;
+        window.addEventListener('message', function (e) {
+          if (e.data &amp;&amp; e.data.kind === 'append') {
+            var d = document.createElement('p');
+            d.textContent = e.data.text;
+            document.getElementById('artstream').appendChild(d);
+          }
+          if (e.data &amp;&amp; e.data.kind === 'mutate') {
+            document.getElementById('art').firstChild.data = e.data.text;
+          }
+        });
+      &lt;/script&gt;
+    &lt;/body&gt;
+  "></iframe>
+
+  <script>
+    // Driven from the test rather than on a timer, so assertions are not racing
+    // an arbitrary delay.
+    window.__cfStreamAppend = function (text) {
+      const p = document.createElement('p');
+      p.textContent = text;
+      document.getElementById('stream').appendChild(p);
+      return true;
+    };
+
+    // characterData mutation on an existing node - the case a childList-only
+    // observer would miss, and the one that matters for streaming tokens.
+    window.__cfStreamMutate = function (text) {
+      const el = document.getElementById('stream');
+      if (!el.firstChild) el.appendChild(document.createTextNode(''));
+      el.firstChild.textContent = text;
+      return true;
+    };
+
+    window.__cfArtifact = function (kind, text) {
+      document.getElementById('artifact').contentWindow.postMessage({ kind, text }, '*');
+      return true;
+    };
+  </script>
+</body>
+</html>

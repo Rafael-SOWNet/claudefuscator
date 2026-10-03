@@ -1,0 +1,25 @@
+{
+  "name": "claudefuscator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tokenize incidental identifiers before they reach Claude; restore them locally.",
+  "license": "MIT",
+  "scripts": {
+    "sync": "node tools/sync-core.js",
+    "vectors": "node tools/gen-vectors.js",
+    "check-sync": "node tools/sync-core.js --check && node tools/gen-vectors.js --check && python tools/gen-vault-vectors.py --check",
+    "test": "npm run check-sync && node --test \"test/*.test.js\" \"test/*.test.mjs\"",
+    "test:py": "python -m pytest proxy agent -q",
+    "e2e": "node e2e/run-extension-e2e.js",
+    "e2e:headed": "node e2e/run-extension-e2e.js --headed",
+    "test:all": "npm test && npm run test:py && npm run e2e && npm run test:mod",
+    "validate-plugin": "claude plugin validate ./claude-plugin",
+    "test:mod": "node tools/run-mod-tests.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

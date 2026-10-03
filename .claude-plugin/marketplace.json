@@ -1,0 +1,17 @@
+{
+  "name": "claudefuscator",
+  "description": "Claudefuscator: replaces incidental identifiers with stable tokens before they reach Anthropic, and restores them locally.",
+  "owner": { "name": "Rafael Vuijk" },
+  "plugins": [
+    {
+      "name": "claudefuscator",
+      "source": "./claude-mod",
+      "description": "Mod mode. Rewrites the typed prompt, project instructions, tool descriptions, tool calls and rendered output. Needs Claude Code 2.1.287+."
+    },
+    {
+      "name": "claudefuscator-hooks",
+      "source": "./claude-plugin",
+      "description": "Hooks-only mode, for versions without mod support. Covers tool output; cannot rewrite a typed prompt."
+    }
+  ]
+}

@@ -1,0 +1,247 @@
+"""Tests for the local agent.
+
+The claims that matter here are refusals: the agent serves real identifier
+values, so most of these assert that it does NOT do something.
+"""
+
+import json
+import os
+import pathlib
+import sys
+import threading
+from http.server import ThreadingHTTPServer
+
+import pytest
+import requests
+
+AGENT_DIR = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(AGENT_DIR))
+sys.path.insert(0, str(AGENT_DIR.parent / 'proxy'))
+
+import claudefuscator_agent as agent        # noqa: E402
+import claudefuscator_core as core          # noqa: E402
+
+KEY = 'agent-test-key'
+CONFIG = {
+    'tokenLength': 8,
+    'internalDomains': ['corp.example'],
+    'identifiers': [
+        {'type': 'PERSON', 'value': 'Jane Example'},
+        {'type': 'HOST', 'value': 'build-01.corp.example'},
+    ],
+}
+REAL_PERSON = 'Jane Example'
+REAL_HOST = 'build-01.corp.example'
+
+
+def auth():
+    return core.hmac_hex(KEY, agent.AUTH_LABEL)[:32]
+
+
+@pytest.fixture
+def running(tmp_path):
+    store = agent.Store(KEY, CONFIG, tmp_path / 'discovered.json')
+    agent.Handler.store = store
+    server = ThreadingHTTPServer(('127.0.0.1', 0), agent.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f'http://127.0.0.1:{server.server_address[1]}'
+    try:
+        yield url, store
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def post(url, path, payload, with_auth=True):
+    headers = {'Content-Type': 'application/json'}
+    if with_auth:
+        headers[agent.AUTH_HEADER] = auth()
+    return requests.post(url + path, data=json.dumps(payload), headers=headers, timeout=10)
+
+
+def token_for(type_, value):
+    return core.derive_token(KEY, type_, value, 8)
+
+
+# ---- refusals ---------------------------------------------------------
+
+def test_resolve_refuses_without_the_auth_header(running):
+    url, _ = running
+    r = post(url, '/resolve', {'tokens': [token_for('PERSON', REAL_PERSON)]}, with_auth=False)
+    assert r.status_code == 403
+    assert REAL_PERSON not in r.text
+
+
+def test_resolve_refuses_a_wrong_token(running):
+    url, _ = running
+    r = requests.post(url + '/resolve', data=json.dumps({'tokens': []}),
+                      headers={agent.AUTH_HEADER: 'f' * 32}, timeout=10)
+    assert r.status_code == 403
+
+
+def test_there_is_no_bulk_export(running):
+    """A dump of the whole table is what an attacker wants, so no route
+    returns one. /resolve answers only about tokens it was given."""
+    url, _ = running
+    for path in ('/mappings', '/resolve', '/all', '/export', '/dump'):
+        r = requests.get(url + path, headers={agent.AUTH_HEADER: auth()}, timeout=10)
+        assert r.status_code == 404, f'GET {path} should not exist'
+        assert REAL_PERSON not in r.text
+
+
+def test_no_cors_header_is_sent(running):
+    """A page may send a request; it must never read the response."""
+    url, _ = running
+    r = post(url, '/resolve', {'tokens': []})
+    assert 'Access-Control-Allow-Origin' not in r.headers
+
+
+def test_healthz_reports_counts_but_no_values(running):
+    url, _ = running
+    r = requests.get(url + '/healthz', timeout=10)      # no auth needed
+    assert r.status_code == 200
+    body = r.json()
+    assert body['known'] == 2
+    assert REAL_PERSON not in r.text and REAL_HOST not in r.text
+
+
+def test_an_oversized_body_is_rejected(running):
+    url, _ = running
+    r = requests.post(url + '/resolve',
+                      data=json.dumps({'tokens': ['x' * (agent.MAX_BODY + 10)]}),
+                      headers={agent.AUTH_HEADER: auth()}, timeout=10)
+    assert r.status_code == 400
+
+
+# ---- resolving --------------------------------------------------------
+
+def test_resolve_returns_only_the_tokens_asked_for(running):
+    url, _ = running
+    wanted = token_for('PERSON', REAL_PERSON)
+    other = token_for('HOST', REAL_HOST)
+    r = post(url, '/resolve', {'tokens': [wanted]})
+    body = r.json()
+    assert body['mappings'] == {wanted: REAL_PERSON}
+    assert other not in r.text, 'a token that was not asked about came back'
+
+
+def test_resolve_reports_what_it_could_not_resolve(running):
+    """This is what drives the red marking in the extension."""
+    url, _ = running
+    r = post(url, '/resolve', {'tokens': ['HOST_zzzzzzzz']})
+    assert r.json()['mappings'] == {}
+    assert r.json()['unresolved'] == ['HOST_zzzzzzzz']
+
+
+# ---- submitting -------------------------------------------------------
+
+def test_a_submitted_mapping_becomes_resolvable(running):
+    url, _ = running
+    tok = token_for('IP', '10.44.2.9')
+    assert post(url, '/resolve', {'tokens': [tok]}).json()['mappings'] == {}
+    assert post(url, '/mappings', {'mappings': [{'token': tok, 'value': '10.44.2.9'}]}).json()['added'] == 1
+    assert post(url, '/resolve', {'tokens': [tok]}).json()['mappings'] == {tok: '10.44.2.9'}
+
+
+def test_writes_are_write_once_and_conflicts_are_reported(running):
+    """Under a correct client a token determines its value, so a conflict is
+    a bug, a key mismatch, or poisoning. Keep the first value and say so."""
+    url, _ = running
+    tok = token_for('IP', '10.44.2.9')
+    post(url, '/mappings', {'mappings': [{'token': tok, 'value': '10.44.2.9'}]})
+    r = post(url, '/mappings', {'mappings': [{'token': tok, 'value': 'attacker.example'}]})
+    assert r.json()['added'] == 0
+    assert r.json()['conflicts'] == [tok]
+    assert post(url, '/resolve', {'tokens': [tok]}).json()['mappings'] == {tok: '10.44.2.9'}
+
+
+def test_submitting_cannot_overwrite_a_list_entry(running):
+    url, _ = running
+    tok = token_for('PERSON', REAL_PERSON)
+    r = post(url, '/mappings', {'mappings': [{'token': tok, 'value': 'Someone Else'}]})
+    assert r.json()['conflicts'] == [tok]
+    assert post(url, '/resolve', {'tokens': [tok]}).json()['mappings'] == {tok: REAL_PERSON}
+
+
+def test_junk_entries_are_ignored_not_fatal(running):
+    url, _ = running
+    r = post(url, '/mappings', {'mappings': [{'token': 1}, {'value': 'x'}, 'nope', {}]})
+    assert r.status_code == 200
+    assert r.json()['added'] == 0
+
+
+# ---- persistence ------------------------------------------------------
+
+def test_discovered_values_survive_a_restart(tmp_path):
+    """Otherwise the browser loses every pattern hit each time the agent is
+    bounced."""
+    cache = tmp_path / 'discovered.json'
+    tok = token_for('IP', '10.44.2.9')
+
+    first = agent.Store(KEY, CONFIG, cache)
+    first.submit([{'token': tok, 'value': '10.44.2.9'}])
+    assert cache.exists()
+
+    second = agent.Store(KEY, CONFIG, cache)
+    assert second.resolve([tok]) == {tok: '10.44.2.9'}
+
+
+def test_a_corrupt_cache_is_treated_as_empty(tmp_path):
+    cache = tmp_path / 'discovered.json'
+    cache.write_text('{ not json', encoding='utf-8')
+    store = agent.Store(KEY, CONFIG, cache)          # must not raise
+    assert store.counts() == (2, 0)
+
+
+def test_the_cache_warns_what_it_holds(tmp_path):
+    cache = tmp_path / 'discovered.json'
+    store = agent.Store(KEY, CONFIG, cache)
+    store.submit([{'token': token_for('IP', '10.1.2.3'), 'value': '10.1.2.3'}])
+    data = json.loads(cache.read_text(encoding='utf-8'))
+    assert 'plaintext' in data['warning']
+    assert data['tokenVersion'] == core.TOKEN_VERSION
+
+
+# ---- startup ----------------------------------------------------------
+
+def test_it_refuses_to_start_without_a_key(monkeypatch, tmp_path):
+    """A silently empty agent looks exactly like a working one from the
+    browser's side, so it must not start at all."""
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    args = type('A', (), {'config': None, 'cache': str(tmp_path / 'c.json')})()
+    store, status = agent.build_store(args)
+    assert store is None
+    assert 'no CLAUDEFUSCATOR_KEY' in status
+
+
+def test_it_refuses_to_start_without_a_config(monkeypatch, tmp_path):
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', KEY)
+    monkeypatch.delenv('CLAUDEFUSCATOR_CONFIG', raising=False)
+    monkeypatch.chdir(tmp_path)
+    args = type('A', (), {'config': None, 'cache': str(tmp_path / 'c.json')})()
+    store, status = agent.build_store(args)
+    assert store is None
+    assert 'no identifier config' in status
+
+
+def test_it_starts_from_a_config_file(monkeypatch, tmp_path):
+    cfg = tmp_path / 'ids.json'
+    cfg.write_text(json.dumps(CONFIG), encoding='utf-8')
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', KEY)
+    args = type('A', (), {'config': str(cfg), 'cache': str(tmp_path / 'c.json')})()
+    store, status = agent.build_store(args)
+    assert store is not None
+    assert status.startswith('ACTIVE') and '2 known' in status
+
+
+# ---- cross-surface ----------------------------------------------------
+
+def test_the_agent_agrees_with_the_committed_vectors():
+    """It derives tokens with the same core as the proxy, the plugin, the mod
+    and the extension. If it did not, nothing it served would resolve."""
+    vectors = json.loads(
+        (AGENT_DIR.parent / 'shared' / 'test-vectors.json').read_text(encoding='utf-8'))
+    store = agent.Store(vectors['key'], vectors['config'], None)
+    for t in vectors['tokens']:
+        assert store.resolve([t['token']]).get(t['token']) == t['value'], \
+            f'the agent cannot resolve {t["token"]}'
