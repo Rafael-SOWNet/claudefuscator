@@ -240,6 +240,129 @@ public sealed class VaultTests : IClassFixture<VaultFactory>
         Assert.DoesNotContain(slice.ByProduct, g => g.Name == "beta");
     }
 
+    // --- the shared identifier list ---------------------------------------
+
+    /// <summary>
+    /// A server of its own. The identifier list is a single row, so these
+    /// tests cannot share one the way the mapping tests can - under xUnit's
+    /// ordering a version written by one would decide whether another's
+    /// publish was accepted.
+    /// </summary>
+    private static (VaultFactory Factory, HttpClient Client) Fresh(string token)
+    {
+        var factory = new VaultFactory();
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return (factory, client);
+    }
+
+    private static PutIdentifiersRequest Document(int version, string marker)
+        => new(1, version, Convert.ToBase64String(new byte[12]),
+               Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("sealed-list:" + marker)));
+
+    [Fact]
+    public async Task Publishing_the_list_needs_its_own_role()
+    {
+        // Not WriteMappings. Contributing a discovered value affects one
+        // token; replacing this list pushes configuration to every machine,
+        // and whoever can do that decides what everybody stops hiding.
+        var (factory, contributor) = Fresh(VaultFactory.AlphaToken);
+        using var _ = factory;
+        using var __ = contributor;
+
+        var refused = await contributor.PutAsJsonAsync("/api/vault/identifiers", Document(1, "a"));
+        Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+
+        using var manager = factory.CreateClient();
+        manager.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", VaultFactory.ManagerToken);
+        var allowed = await manager.PutAsJsonAsync("/api/vault/identifiers", Document(1, "a"));
+        allowed.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task Anyone_who_may_resolve_may_read_the_list()
+    {
+        var (factory, manager) = Fresh(VaultFactory.ManagerToken);
+        using var _ = factory;
+        using var __ = manager;
+        await manager.PutAsJsonAsync("/api/vault/identifiers", Document(10, "readable"));
+
+        // The list and the mappings are the same class of secret - both say
+        // which strings are sensitive - so reading is gated the same way.
+        using var contributor = factory.CreateClient();
+        contributor.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", VaultFactory.AlphaToken);
+        var response = await contributor.GetAsync("/api/vault/identifiers");
+        response.EnsureSuccessStatusCode();
+
+        var body = await response.Content.ReadFromJsonAsync<IdentifierDocumentDto>();
+        Assert.Equal(10, body!.Version);
+    }
+
+    [Fact]
+    public async Task An_older_version_cannot_replace_a_newer_one()
+    {
+        var (factory, manager) = Fresh(VaultFactory.ManagerToken);
+        using var _ = factory;
+        using var __ = manager;
+        await manager.PutAsJsonAsync("/api/vault/identifiers", Document(50, "current"));
+
+        var rollback = await manager.PutAsJsonAsync("/api/vault/identifiers", Document(49, "stale"));
+
+        // The envelope binds its version so a client would refuse a replayed
+        // list anyway; refusing it here means a stale one never reaches a
+        // client at all, and two administrators publishing at once get a
+        // conflict rather than one edit silently winning.
+        Assert.Equal(HttpStatusCode.Conflict, rollback.StatusCode);
+
+        var current = await (await manager.GetAsync("/api/vault/identifiers")).Content
+            .ReadFromJsonAsync<IdentifierDocumentDto>();
+        Assert.Equal(50, current!.Version);
+        Assert.Equal(Document(50, "current").Ciphertext, current.Ciphertext);
+    }
+
+    [Fact]
+    public async Task Re_publishing_the_same_version_is_refused_too()
+    {
+        var (factory, manager) = Fresh(VaultFactory.ManagerToken);
+        using var _ = factory;
+        using var __ = manager;
+        await manager.PutAsJsonAsync("/api/vault/identifiers", Document(70, "first"));
+
+        var same = await manager.PutAsJsonAsync("/api/vault/identifiers", Document(70, "second"));
+        Assert.Equal(HttpStatusCode.Conflict, same.StatusCode);
+    }
+
+    [Fact]
+    public async Task No_list_published_is_a_404_rather_than_an_empty_one()
+    {
+        // An empty list would read as "nothing to hide" and scrub nothing.
+        // Absent has to be distinguishable from empty.
+        using var factory = new VaultFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", VaultFactory.AdminToken);
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.GetAsync("/api/vault/identifiers")).StatusCode);
+    }
+
+    [Fact]
+    public async Task The_server_stores_the_list_without_being_able_to_read_it()
+    {
+        var (factory, manager) = Fresh(VaultFactory.ManagerToken);
+        using var _ = factory;
+        using var __ = manager;
+        await manager.PutAsJsonAsync("/api/vault/identifiers", Document(90, "Jane Example"));
+
+        var raw = await (await manager.GetAsync("/api/vault/identifiers")).Content.ReadAsStringAsync();
+
+        // The marker is inside the ciphertext, base64 of it. What must not
+        // appear is the plaintext.
+        Assert.DoesNotContain("Jane Example", raw, StringComparison.Ordinal);
+    }
+
     // --- the shape the agent parses ---------------------------------------
 
     [Fact]
@@ -273,6 +396,7 @@ public sealed class VaultFactory : WebApplicationFactory<Program>, IDisposable
 {
     public const string AdminToken = "reference-admin-token";
     public const string AlphaToken = "reference-alpha-token";
+    public const string ManagerToken = "reference-manager-token";
 
     private readonly string _directory =
         Path.Combine(Path.GetTempPath(), "cf-vault-" + Guid.NewGuid().ToString("N"));
@@ -285,7 +409,9 @@ public sealed class VaultFactory : WebApplicationFactory<Program>, IDisposable
         File.WriteAllText(tokens, $$"""
             { "tokens": [
                 { "name": "admin", "token": "{{AdminToken}}", "allProducts": true },
-                { "name": "alpha-only", "token": "{{AlphaToken}}", "products": ["alpha"] }
+                { "name": "alpha-only", "token": "{{AlphaToken}}", "products": ["alpha"] },
+                { "name": "list-manager", "token": "{{ManagerToken}}", "allProducts": true,
+                  "roles": ["ManageIdentifiers"] }
             ] }
             """);
 

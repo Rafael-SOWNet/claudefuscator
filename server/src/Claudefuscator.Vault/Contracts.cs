@@ -54,12 +54,51 @@ public sealed record StatsResponse(
     IReadOnlyList<StatsGroupDto> ByType,
     bool Partial);
 
-/// <summary>Who is calling, and what they may read.</summary>
+/// <summary>
+/// The identifier list, sealed. The server stores and serves it without
+/// being able to read it, exactly like a mapping.
+/// </summary>
+/// <param name="Version">
+/// Monotonic, and bound into the envelope's additional data. That is what
+/// stops a rollback: an old list cannot be replayed as the current one
+/// without being re-sealed, which needs the key.
+/// </param>
+public sealed record IdentifierDocumentDto(
+    int EnvelopeVersion,
+    int Version,
+    string Nonce,
+    string Ciphertext,
+    string? UpdatedBy,
+    string? UpdatedAt);
+
+public sealed record PutIdentifiersRequest(
+    int EnvelopeVersion,
+    int Version,
+    string Nonce,
+    string Ciphertext);
+
+/// <summary>Who is calling, what they may read, and what they may do.</summary>
 /// <param name="Name">For the audit trail only.</param>
 /// <param name="AllProducts">No restriction, including products added later.</param>
 /// <param name="Products">Granted products when <paramref name="AllProducts"/> is false.</param>
-public sealed record Identity(string Name, bool AllProducts, IReadOnlySet<string> Products)
+/// <param name="Roles">
+/// Named permissions. <c>ManageIdentifiers</c> is deliberately its own role
+/// rather than part of writing mappings: contributing one discovered value
+/// affects one token, whereas replacing the identifier list pushes
+/// configuration to every machine in the organisation. Those are different
+/// powers and should be granted separately.
+/// </param>
+public sealed record Identity(
+    string Name,
+    bool AllProducts,
+    IReadOnlySet<string> Products,
+    IReadOnlySet<string> Roles)
 {
+    /// <summary>Replace the shared identifier list.</summary>
+    public const string ManageIdentifiers = "ManageIdentifiers";
+
+    public bool Has(string role) => Roles.Contains(role);
+
     /// <summary>
     /// A row with no product is readable only through <see cref="AllProducts"/>.
     /// Unassigned is the most restrictive state, not the least, so a mapping
@@ -113,10 +152,21 @@ internal sealed class TokenFile
                 }
             }
 
+            var roles = new HashSet<string>(StringComparer.Ordinal);
+            if (entry.TryGetProperty("roles", out var roleList)
+                && roleList.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var r in roleList.EnumerateArray())
+                {
+                    if (r.GetString() is { Length: > 0 } role) roles.Add(role);
+                }
+            }
+
             byHash[Hash(token)] = new Identity(
                 entry.TryGetProperty("name", out var n) ? n.GetString() ?? "unnamed" : "unnamed",
                 entry.TryGetProperty("allProducts", out var a) && a.ValueKind == JsonValueKind.True,
-                products);
+                products,
+                roles);
         }
 
         return new TokenFile(byHash);

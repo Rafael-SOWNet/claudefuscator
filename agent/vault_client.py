@@ -122,12 +122,12 @@ class VaultClient:
 
     # ---- transport -----------------------------------------------------
 
-    def _post(self, path, payload):
-        body = json.dumps(payload).encode('utf-8')
+    def _request(self, method, path, payload=None):
+        body = json.dumps(payload).encode('utf-8') if payload is not None else None
         request = urllib.request.Request(
             self.base_url + path,
             data=body,
-            method='POST',
+            method=method,
             headers={
                 'Content-Type': 'application/json',
                 'Authorization': 'Bearer ' + self._token,
@@ -151,6 +151,9 @@ class VaultClient:
             self.last_error = f'vault unreachable: {type(e).__name__}'
         return None
 
+    def _get(self, path):
+        return self._request('GET', path)
+
     # ---- api -----------------------------------------------------------
 
     def resolve(self, tokens):
@@ -161,7 +164,7 @@ class VaultClient:
             return {}
 
         self.last_error = None
-        reply = self._post('/api/vault/resolve', {'tokens': wanted})
+        reply = self._request('POST', '/api/vault/resolve', {'tokens': wanted})
         if not reply:
             return {}
 
@@ -204,6 +207,73 @@ class VaultClient:
 
         return out
 
+    # ---- the shared identifier list ------------------------------------
+
+    def fetch_identifiers(self):
+        """The organisation's identifier list, decrypted, or None.
+
+        Returns (document, version). `document` is whatever the publisher
+        sealed - by convention a JSON object holding the config and,
+        optionally, an example text to try rules against. This client does
+        not interpret it beyond decrypting; the caller decides.
+
+        Fails soft like everything else here: a vault that is down, a list
+        nobody has published, or one this key cannot open all return None,
+        and the agent carries on with local configuration.
+        """
+        if not self.secret:
+            return None, 0
+
+        self.last_error = None
+        reply = self._get('/api/vault/identifiers')
+        if not reply:
+            return None, 0
+
+        envelope = {
+            'v': reply.get('envelopeVersion'),
+            'version': reply.get('version'),
+            'n': reply.get('nonce'),
+            'ct': reply.get('ciphertext'),
+        }
+        try:
+            text = vc.open_document(self.secret, envelope)
+        except vc.VaultCryptoError as e:
+            # A list this key cannot open is not a list. Say so rather than
+            # silently running on local config, because "my colleague's
+            # entries are missing" is otherwise indistinguishable from
+            # "nobody has published any".
+            self.last_error = f'the published identifier list did not open: {e}'
+            return None, 0
+
+        return text, int(envelope['version'] or 0)
+
+    def publish_identifiers(self, text, version):
+        """Seal and publish the list. Needs the ManageIdentifiers role.
+
+        The version is bound into the envelope, so an older list cannot
+        later be replayed as the current one without being re-sealed - and
+        the server refuses a version that is not an increase, so two people
+        publishing at once get a conflict instead of one edit vanishing.
+        """
+        if not self.secret:
+            return False, 'no key'
+
+        try:
+            envelope = vc.seal_document(self.secret, text, version)
+        except vc.VaultCryptoError as e:
+            return False, str(e)
+
+        self.last_error = None
+        reply = self._request('PUT', '/api/vault/identifiers', {
+            'envelopeVersion': envelope['v'],
+            'version': envelope['version'],
+            'nonce': envelope['n'],
+            'ciphertext': envelope['ct'],
+        })
+        if reply is None:
+            return False, self.last_error or 'the vault refused it'
+        return True, None
+
     def submit(self, pairs, product=None):
         """Seal and store token -> value pairs. Returns (added, conflicts)."""
         if not pairs or not self.secret:
@@ -236,7 +306,7 @@ class VaultClient:
             return 0, []
 
         self.last_error = None
-        reply = self._post('/api/vault/mappings', {'mappings': rows})
+        reply = self._request('POST', '/api/vault/mappings', {'mappings': rows})
         if not reply:
             return 0, []
 

@@ -32,11 +32,37 @@ class FakeVault(BaseHTTPRequestHandler):
     test can arrange answers and inspect what was asked."""
 
     rows = {}
+    document = None
     seen = {'auth': [], 'tokens': [], 'submitted': []}
     protocol_version = 'HTTP/1.1'
 
     def log_message(self, *_args):
         pass
+
+    def do_GET(self):
+        if not self.path.endswith('/identifiers') or FakeVault.document is None:
+            self.send_response(404); self.send_header('Content-Length','0'); self.end_headers(); return
+        out = json.dumps(FakeVault.document).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+    def do_PUT(self):
+        length = int(self.headers.get('Content-Length') or 0)
+        body = json.loads(self.rfile.read(length) or b'{}')
+        FakeVault.seen['auth'].append(self.headers.get('Authorization'))
+        current = FakeVault.document
+        if current and body.get('version', 0) <= current.get('version', 0):
+            self.send_response(409); self.send_header('Content-Length','0'); self.end_headers(); return
+        FakeVault.document = body
+        out = b'{"stored":true}'
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length') or 0)
@@ -75,6 +101,7 @@ def row_for(token, value, key=KEY, product=None):
 @pytest.fixture
 def vault():
     FakeVault.rows = {}
+    FakeVault.document = None
     FakeVault.seen = {'auth': [], 'tokens': [], 'submitted': []}
     server = ThreadingHTTPServer(('127.0.0.1', 0), FakeVault)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -275,6 +302,78 @@ def test_a_redirect_is_refused_and_never_followed(redirecting):
 def test_a_redirect_on_submit_is_refused_too(redirecting):
     client = VaultClient(redirecting, 'aiplatform_pat_secret', KEY, timeout=5)
     assert client.submit([(TOKEN, REAL_IP)]) == (0, [])
+
+
+# ---- the shared identifier list ---------------------------------------
+
+LIST = json.dumps({'identifiers': [{'type': 'PERSON', 'value': 'Jane Example'}],
+                   'example': 'ring Jane Example on Monday'})
+
+
+def test_a_published_list_round_trips(vault):
+    url, _ = vault
+    client = VaultClient(url, 'pat', KEY)
+
+    ok, err = client.publish_identifiers(LIST, version=1)
+    assert ok, err
+
+    text, version = client.fetch_identifiers()
+    assert json.loads(text)['identifiers'][0]['value'] == 'Jane Example'
+    assert version == 1
+
+
+def test_the_list_goes_up_encrypted(vault):
+    url, fake = vault
+    VaultClient(url, 'pat', KEY).publish_identifiers(LIST, version=1)
+
+    # The list is the distilled statement of which strings are sensitive,
+    # which makes it worth more than any single one of them. It must not be
+    # readable by whoever holds the store.
+    assert 'Jane Example' not in json.dumps(fake.document)
+
+
+def test_a_list_this_key_cannot_open_is_reported_not_ignored(vault):
+    url, _ = vault
+    VaultClient(url, 'pat', 'somebody-elses-key').publish_identifiers(LIST, version=1)
+
+    client = VaultClient(url, 'pat', KEY)
+    text, version = client.fetch_identifiers()
+
+    # Silently falling back to local config would make "my colleague's
+    # entries are missing" indistinguishable from "nobody published any".
+    assert text is None
+    assert 'did not open' in (client.last_error or '')
+
+
+def test_an_older_version_cannot_replace_a_newer_one(vault):
+    url, _ = vault
+    client = VaultClient(url, 'pat', KEY)
+    client.publish_identifiers(json.dumps({'identifiers': [], 'note': 'current'}), version=5)
+
+    ok, _ = client.publish_identifiers(json.dumps({'identifiers': [], 'note': 'stale'}), version=4)
+    assert not ok
+
+    text, version = client.fetch_identifiers()
+    assert version == 5 and 'current' in text
+
+
+def test_a_replayed_envelope_does_not_open_under_a_different_version(vault):
+    """The server refuses a stale version, but the envelope binds it too, so
+    a store that did not refuse could still not make a client accept one."""
+    url, fake = vault
+    client = VaultClient(url, 'pat', KEY)
+    client.publish_identifiers(LIST, version=9)
+
+    fake.document = dict(fake.document, version=8)   # as a tampering store would
+    text, _ = client.fetch_identifiers()
+    assert text is None
+
+
+def test_no_list_published_is_not_an_error(vault):
+    url, _ = vault
+    client = VaultClient(url, 'pat', KEY)
+    text, version = client.fetch_identifiers()
+    assert text is None and version == 0
 
 
 # ---- failing soft -----------------------------------------------------

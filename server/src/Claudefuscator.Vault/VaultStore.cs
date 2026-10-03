@@ -76,6 +76,21 @@ internal sealed class VaultStore
                 PRIMARY KEY (token, token_version)
             );
             CREATE INDEX IF NOT EXISTS ix_vault_product ON vault_mappings(product);
+
+            -- One row, replaced in place. History is not kept here on
+            -- purpose: an old sealed list is still readable by anyone with
+            -- the key, so keeping every revision would quietly build the
+            -- very archive the version binding exists to stop being
+            -- replayed.
+            CREATE TABLE IF NOT EXISTS vault_identifiers (
+                id               INTEGER PRIMARY KEY CHECK (id = 1),
+                envelope_version INTEGER NOT NULL,
+                version          INTEGER NOT NULL,
+                nonce            TEXT    NOT NULL,
+                ciphertext       TEXT    NOT NULL,
+                updated_by       TEXT    NOT NULL,
+                updated_at       TEXT    NOT NULL
+            );
             """;
         command.ExecuteNonQuery();
     }
@@ -205,6 +220,60 @@ internal sealed class VaultStore
 
         transaction.Commit();
         return new SubmitResponse(added, conflicts, rejected);
+    }
+
+    /// <summary>The sealed identifier list, or null when none is published.</summary>
+    public IdentifierDocumentDto? GetIdentifiers()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT envelope_version, version, nonce, ciphertext, updated_by, updated_at "
+            + "FROM vault_identifiers WHERE id = 1";
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+
+        return new IdentifierDocumentDto(
+            reader.GetInt32(0), reader.GetInt32(1), reader.GetString(2),
+            reader.GetString(3), reader.GetString(4), reader.GetString(5));
+    }
+
+    /// <summary>
+    /// Replace the list. Returns false when <paramref name="document"/> is
+    /// not newer than what is stored.
+    /// </summary>
+    /// <remarks>
+    /// Refusing a version that is not an increase is the server's half of
+    /// the rollback defence. The envelope binds its version cryptographically
+    /// so a client will not open a replayed one, but refusing it here means
+    /// a stale list never reaches a client to be rejected, and two
+    /// administrators publishing concurrently cannot silently lose one
+    /// edit - the second gets a refusal instead.
+    /// </remarks>
+    public bool PutIdentifiers(Identity who, PutIdentifiersRequest document)
+    {
+        var current = GetIdentifiers();
+        if (current is not null && document.Version <= current.Version) return false;
+
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO vault_identifiers
+                (id, envelope_version, version, nonce, ciphertext, updated_by, updated_at)
+            VALUES (1, $envelope, $version, $nonce, $ct, $by, $at)
+            ON CONFLICT(id) DO UPDATE SET
+                envelope_version = $envelope, version = $version, nonce = $nonce,
+                ciphertext = $ct, updated_by = $by, updated_at = $at
+            """;
+        command.Parameters.AddWithValue("$envelope", document.EnvelopeVersion);
+        command.Parameters.AddWithValue("$version", document.Version);
+        command.Parameters.AddWithValue("$nonce", document.Nonce);
+        command.Parameters.AddWithValue("$ct", document.Ciphertext);
+        command.Parameters.AddWithValue("$by", who.Name);
+        command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("o"));
+        command.ExecuteNonQuery();
+        return true;
     }
 
     /// <summary>How much is here, counting only what this caller may read.</summary>

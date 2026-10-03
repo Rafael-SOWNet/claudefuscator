@@ -63,6 +63,41 @@ vault.MapPost("/mappings", (SubmitRequest request, HttpContext http, VaultStore 
     return Results.Ok(store.Submit(who, request.Mappings ?? []));
 });
 
+vault.MapGet("/identifiers", (HttpContext http, VaultStore store, TokenFile tokens) =>
+{
+    var who = Caller(http, tokens);
+    if (who is null) return Results.Unauthorized();
+
+    // Readable by anyone who may resolve. The list and the mappings are the
+    // same class of secret - both say which strings are sensitive - so
+    // gating them differently would be a distinction without a difference.
+    var document = store.GetIdentifiers();
+    return document is null ? Results.NotFound() : Results.Ok(document);
+});
+
+vault.MapPut("/identifiers", (PutIdentifiersRequest request, HttpContext http, VaultStore store, TokenFile tokens) =>
+{
+    var who = Caller(http, tokens);
+    if (who is null) return Results.Unauthorized();
+
+    // Its own role, not WriteMappings. Contributing a discovered value
+    // affects one token; replacing this list pushes configuration to every
+    // machine in the organisation, and whoever can do that can decide what
+    // everybody stops sending to Anthropic - or quietly stops hiding.
+    // StatusCode(403) rather than Results.Forbid(): Forbid() delegates to
+    // the authentication stack, and this server has none - it does bearer
+    // auth by hand - so it answers 500 and a permission refusal looks like
+    // a server fault. Caught by the test that asserts the refusal.
+    if (!who.Has(Identity.ManageIdentifiers))
+    {
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    }
+
+    return store.PutIdentifiers(who, request)
+        ? Results.Ok(new { stored = true, version = request.Version })
+        : Results.Conflict(new { stored = false, reason = "version is not newer than the stored list" });
+});
+
 vault.MapGet("/stats", (HttpContext http, VaultStore store, TokenFile tokens) =>
 {
     var who = Caller(http, tokens);

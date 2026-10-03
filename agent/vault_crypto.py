@@ -132,6 +132,74 @@ def open_envelope(secret, token, envelope, product=None):
         raise VaultCryptoError('the row did not decode as text') from None
 
 
+DOCUMENT_LABEL = 'claudefuscator/identifiers/v1'
+
+
+def _document_aad(label, version):
+    """version | label, length-prefixed like _aad.
+
+    Binding the version in is what stops a rollback: an old list cannot be
+    replayed as the current one without being re-sealed, which needs the
+    key. Without it, anyone able to write to the store could quietly revert
+    everybody to a list that is missing an identifier they want sent.
+    """
+    out = bytearray()
+    for part in (core.TOKEN_VERSION, label, str(int(version))):
+        b = part.encode('utf-8')
+        out += len(b).to_bytes(4, 'big') + b
+    return bytes(out)
+
+
+def seal_document(secret, text, version, label=DOCUMENT_LABEL):
+    """A whole document - an identifier list - sealed for the vault.
+
+    Separate from seal() because a document has no token to bind to. That
+    costs something real and worth naming: a mapping can be checked by
+    re-deriving its token, so a wrong one is caught by every reader, while
+    a document can only be checked for having been written by somebody
+    holding the key. Who may write one is therefore an access-control
+    question rather than a cryptographic one.
+    """
+    if not isinstance(text, str):
+        raise VaultCryptoError('a document must be text')
+    nonce = os.urandom(NONCE_BYTES)
+    ct = AESGCM(value_key(secret)).encrypt(
+        nonce, text.encode('utf-8'), _document_aad(label, version))
+    return {
+        'v': ENVELOPE_VERSION,
+        'version': int(version),
+        'n': base64.b64encode(nonce).decode('ascii'),
+        'ct': base64.b64encode(ct).decode('ascii'),
+    }
+
+
+def open_document(secret, envelope, label=DOCUMENT_LABEL):
+    """The document back, or VaultCryptoError.
+
+    Fails rather than guesses. A document sealed at another version, under
+    another key, or altered by a byte does not open.
+    """
+    if not isinstance(envelope, dict):
+        raise VaultCryptoError('not an envelope')
+    if envelope.get('v') != ENVELOPE_VERSION:
+        raise VaultCryptoError(f'unsupported envelope version {envelope.get("v")!r}')
+    try:
+        version = int(envelope['version'])
+        nonce = base64.b64decode(envelope['n'], validate=True)
+        ct = base64.b64decode(envelope['ct'], validate=True)
+    except (KeyError, ValueError, TypeError) as e:
+        raise VaultCryptoError(f'malformed envelope: {e}') from None
+    try:
+        plain = AESGCM(value_key(secret)).decrypt(nonce, ct, _document_aad(label, version))
+    except InvalidTag:
+        raise VaultCryptoError('the document does not authenticate under this key, '
+                               'label and version') from None
+    try:
+        return plain.decode('utf-8')
+    except UnicodeDecodeError:
+        raise VaultCryptoError('the document did not decode as text') from None
+
+
 def verify_token(secret, token, value, token_length=None):
     """Does this value actually hash back to this token?
 
