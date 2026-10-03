@@ -236,6 +236,16 @@ class Vault:
             })
 
         self.alternatives = alternatives
+
+        # PARITY: the same patterns again, anchorable at one position, so
+        # scrub can ask whether a literal that won a position is only a
+        # FRAGMENT of a longer pattern match starting in the same place.
+        self.pattern_probes = [
+            {'alt': {'kind': 'pattern', 'type': p['type'], 'name': p['name'],
+                     'guard': p['guard']},
+             're': re.compile(p['source'], re.IGNORECASE)}
+            for p in self.patterns
+        ]
         self.scrub_re = (
             re.compile('|'.join('(' + a['source'] + ')' for a in alternatives), re.IGNORECASE)
             if alternatives else None
@@ -273,52 +283,102 @@ class Vault:
         hits = []
         pieces = []
         cursor = 0
+        pos = 0
 
-        for m in self.scrub_re.finditer(src):
+        while True:
+            m = self.scrub_re.search(src, pos)
+            if m is None:
+                break
             if m.group(0) == '':
+                pos = m.start() + 1
                 continue
+            if m.start() < cursor:
+                pos = cursor
+                continue
+
             group_index = m.lastindex
             if not group_index:
+                pos = m.start() + 1
                 continue
             alt = self.alternatives[group_index - 1]
 
-            # PARITY: allow-list wins over everything, pattern or literal.
-            if normalise(m.group(0)) in self.allow:
-                continue
+            # PARITY: every candidate starting HERE, longest first.
+            #
+            # Alternation order alone is not enough. Literals come first so a
+            # listed value gets its list token - the only kind the Chrome side
+            # can restore. But a `compound` literal drops the word boundary to
+            # match inside a symbol name, and that let a short literal win a
+            # position where a longer pattern also started: `Acme` beat the
+            # email pattern in `Acme@partner.example` and sent the domain
+            # upstream in clear, and a case-sensitive literal that then failed
+            # its exact-case check consumed the position and leaked the whole
+            # address. Longest wins; a literal wins a tie.
+            candidates = [{'alt': alt, 'text': m.group(0)}]
+            for probe in self.pattern_probes:
+                pm = probe['re'].match(src, m.start())
+                if pm and pm.group(0) and len(pm.group(0)) > len(m.group(0)):
+                    candidates.append({'alt': probe['alt'], 'text': pm.group(0)})
+            candidates.sort(
+                key=lambda c: (-len(c['text']), 0 if c['alt']['kind'] == 'literal' else 1))
 
-            if alt['kind'] == 'literal':
-                # PARITY: resolve exact case by the TEXT THAT MATCHED, not by
-                # the alternative that won the position - otherwise a sibling
-                # spelling sorting first would drop the match entirely.
-                if alt.get('caseSensitive'):
-                    if m.group(0) not in self.case_sensitive_literals:
-                        continue
-                    token = self.literal_to_token.get(m.group(0))
-                else:
-                    token = self.literal_to_token.get(alt['literal'])
-                type_ = token.split('_')[0] if token else None
-            else:
-                if alt['guard'] and not alt['guard'](m.group(0)):
-                    continue
-                type_ = alt['type']
-                token = derive_token(self.secret, type_, m.group(0), self.token_length)
-                if token not in self.discovered:
-                    self.discovered[token] = m.group(0)
-                    self._rebuild_restore()
+            token = None
+            type_ = None
+            chosen = None
+            for candidate in candidates:
+                resolved = self._resolve_candidate(candidate)
+                if resolved:
+                    token, type_ = resolved
+                    chosen = candidate
+                    break
+
             if not token:
+                # PARITY: resume one character along, not past the rejected
+                # text, or a value starting inside it is lost.
+                pos = m.start() + 1
                 continue
 
             pieces.append(src[cursor:m.start()])
             pieces.append(token)
-            cursor = m.end()
+            cursor = m.start() + len(chosen['text'])
+            pos = cursor
             hits.append({
                 'token': token,
                 'type': type_,
-                'source': 'list' if alt['kind'] == 'literal' else alt['name'],
+                'source': 'list' if chosen['alt']['kind'] == 'literal' else chosen['alt']['name'],
             })
 
         pieces.append(src[cursor:])
         return ''.join(pieces), hits
+
+    def _resolve_candidate(self, candidate):
+        """One candidate to (token, type), or None when it must not be
+        tokenized. PARITY with resolveCandidate in the JavaScript core."""
+        alt = candidate['alt']
+        text = candidate['text']
+
+        # PARITY: allow-list wins over everything, pattern or literal.
+        if normalise(text) in self.allow:
+            return None
+
+        if alt['kind'] == 'literal':
+            # PARITY: resolve exact case by the TEXT THAT MATCHED, not by the
+            # alternative that won the position - otherwise a sibling spelling
+            # sorting first would drop the match entirely.
+            if alt.get('caseSensitive'):
+                if text not in self.case_sensitive_literals:
+                    return None
+                token = self.literal_to_token.get(text)
+            else:
+                token = self.literal_to_token.get(alt['literal'])
+            return (token, token.split('_')[0]) if token else None
+
+        if alt['guard'] and not alt['guard'](text):
+            return None
+        token = derive_token(self.secret, alt['type'], text, self.token_length)
+        if token not in self.discovered:
+            self.discovered[token] = text
+            self._rebuild_restore()
+        return token, alt['type']
 
     def restore(self, text):
         """Tokens -> real values. Pure substitution over the known token set."""

@@ -376,6 +376,16 @@ function compile(vault) {
   vault.scrubRe = alternatives.length
     ? new RegExp(alternatives.map(function (a) { return '(' + a.source + ')'; }).join('|'), 'gi')
     : null;
+
+  /* The same patterns again, sticky, so one position can be probed without
+   * rescanning. scrub uses these to find out whether a literal that won a
+   * position is really just a FRAGMENT of a longer pattern match starting
+   * at the same place - `Acme` inside `Acme@partner.example`. */
+  vault.patternProbes = vault.patterns.map(function (p) {
+    return { alt: { kind: 'pattern', type: p.type, name: p.name, guard: p.guard },
+             re: new RegExp(p.source, 'iy') };
+  });
+
   rebuildRestore(vault);
 }
 
@@ -424,68 +434,119 @@ async function scrub(text, vault) {
   const src = String(text == null ? '' : text);
   if (!vault.scrubRe || !src) return { text: src, hits: [], changed: false };
 
+  const hits = [];
+  const pieces = [];
+  let cursor = 0;
+
   vault.scrubRe.lastIndex = 0;
-  const matches = [];
   let m;
   while ((m = vault.scrubRe.exec(src)) !== null) {
     if (m[0] === '') { vault.scrubRe.lastIndex++; continue; }
+
+    /* The alternation can report a match inside text an earlier, longer one
+     * already consumed. Skip it rather than splicing backwards. */
+    if (m.index < cursor) continue;
+
     let groupIndex = -1;
     for (let i = 1; i < m.length; i++) {
       if (m[i] !== undefined) { groupIndex = i; break; }
     }
     const alt = groupIndex > 0 ? vault.alternatives[groupIndex - 1] : null;
     if (!alt) continue;
-    matches.push({ index: m.index, text: m[0], alt: alt });
-  }
 
-  const hits = [];
-  const pieces = [];
-  let cursor = 0;
-
-  for (const match of matches) {
-    let token = null;
-    let type = null;
-
-    /* Allow-list wins over everything, pattern or literal. */
-    if (vault.allow.has(normalise(match.text))) continue;
-
-    if (match.alt.kind === 'literal') {
-      /* One RegExp cannot mix case flags per alternative, so the regex stays
-       * case-insensitive and exact case is resolved here, by the TEXT THAT
-       * MATCHED rather than by the alternative that won the position.
-       * Filtering on the alternative instead would drop the match entirely
-       * whenever a sibling spelling happened to sort first - `acme` winning
-       * the position would stop `Acme` and `ACME` ever being tokenized. */
-      if (match.alt.caseSensitive) {
-        if (!vault.caseSensitiveLiterals.has(match.text)) continue;
-        token = vault.literalToToken.get(match.text);
-      } else {
-        token = vault.literalToToken.get(match.alt.literal);
-      }
-      type = token ? token.split('_')[0] : null;
-    } else {
-      if (match.alt.guard && !match.alt.guard(match.text)) continue;
-      type = match.alt.type;
-      token = await deriveToken(vault.secret, type, match.text, vault.tokenLength);
-      if (!vault.discovered.has(token)) {
-        vault.discovered.set(token, match.text);
-        rebuildRestore(vault);
+    /* Every candidate starting HERE, longest first.
+     *
+     * Alternation order alone is not enough. Literals are listed first on
+     * purpose, so a value on the list gets its list token - the only kind
+     * the Chrome side can restore. But a `compound` literal drops the word
+     * boundary so it can match inside a symbol name, and that lets a short
+     * literal win a position where a much longer pattern also starts:
+     * `Acme` beat the email pattern in `Acme@partner.example`, tokenizing
+     * four characters and sending the domain upstream in clear. Worse, a
+     * case-sensitive literal that then failed its exact-case check consumed
+     * the position and left the whole address unscrubbed.
+     *
+     * So: collect what matches here, prefer the longest, and let a literal
+     * win a tie - which preserves the list-token intent for a literal that
+     * IS the match, and refuses it for one that is merely a fragment. */
+    const candidates = [{ alt: alt, text: m[0] }];
+    for (const probe of vault.patternProbes) {
+      probe.re.lastIndex = m.index;
+      const pm = probe.re.exec(src);
+      if (pm && pm[0] && pm[0].length > m[0].length) {
+        candidates.push({ alt: probe.alt, text: pm[0] });
       }
     }
-    if (!token) continue;
+    candidates.sort(function (a, b) {
+      if (b.text.length !== a.text.length) return b.text.length - a.text.length;
+      return (a.alt.kind === 'literal' ? 0 : 1) - (b.alt.kind === 'literal' ? 0 : 1);
+    });
 
-    pieces.push(src.slice(cursor, match.index), token);
-    cursor = match.index + match.text.length;
+    let token = null;
+    let type = null;
+    let chosen = null;
+
+    for (const candidate of candidates) {
+      const resolved = await resolveCandidate(vault, candidate);
+      if (resolved) { token = resolved.token; type = resolved.type; chosen = candidate; break; }
+    }
+
+    if (!token) {
+      /* Nothing here resolved - an allow-listed word, the wrong casing, a
+       * guard that said no. Resume one character along rather than past the
+       * rejected text, or a value starting inside it is lost: that is how
+       * a skipped `acme` used to swallow the address it was part of. */
+      vault.scrubRe.lastIndex = m.index + 1;
+      continue;
+    }
+
+    pieces.push(src.slice(cursor, m.index), token);
+    cursor = m.index + chosen.text.length;
+    vault.scrubRe.lastIndex = cursor;
     hits.push({
       token: token,
       type: type,
-      source: match.alt.kind === 'literal' ? 'list' : match.alt.name,
+      source: chosen.alt.kind === 'literal' ? 'list' : chosen.alt.name,
     });
   }
 
   pieces.push(src.slice(cursor));
   const out = pieces.join('');
   return { text: out, hits: hits, changed: out !== src };
+}
+
+/* One candidate to a token, or null when it must not be tokenized. */
+async function resolveCandidate(vault, candidate) {
+  const alt = candidate.alt;
+  const text = candidate.text;
+
+  /* Allow-list wins over everything, pattern or literal. */
+  if (vault.allow.has(normalise(text))) return null;
+
+  if (alt.kind === 'literal') {
+    /* One RegExp cannot mix case flags per alternative, so the regex stays
+     * case-insensitive and exact case is resolved here, by the TEXT THAT
+     * MATCHED rather than by the alternative that won the position.
+     * Filtering on the alternative instead would drop the match entirely
+     * whenever a sibling spelling happened to sort first - `acme` winning
+     * the position would stop `Acme` and `ACME` ever being tokenized. */
+    let token;
+    if (alt.caseSensitive) {
+      if (!vault.caseSensitiveLiterals.has(text)) return null;
+      token = vault.literalToToken.get(text);
+    } else {
+      token = vault.literalToToken.get(alt.literal);
+    }
+    return token ? { token: token, type: token.split('_')[0] } : null;
+  }
+
+  if (alt.guard && !alt.guard(text)) return null;
+  const token = await deriveToken(vault.secret, alt.type, text, vault.tokenLength);
+  if (!vault.discovered.has(token)) {
+    vault.discovered.set(token, text);
+    rebuildRestore(vault);
+  }
+  return { token: token, type: alt.type };
 }
 
 /* Tokens -> real values. Pure substitution over the known token set. */

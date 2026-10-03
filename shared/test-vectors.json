@@ -496,6 +496,37 @@
       "restored": "AcMe stays as written"
     },
     {
+      "name": "compound literal must not swallow a longer email",
+      "input": "mail acme@partner.example and Acme@partner.example",
+      "output": "mail EMAIL_9ff2f4b1 and EMAIL_9ff2f4b1",
+      "hits": [
+        {
+          "token": "EMAIL_9ff2f4b1",
+          "type": "EMAIL",
+          "source": "email"
+        },
+        {
+          "token": "EMAIL_9ff2f4b1",
+          "type": "EMAIL",
+          "source": "email"
+        }
+      ],
+      "restored": "mail acme@partner.example and acme@partner.example"
+    },
+    {
+      "name": "compound literal must not swallow a longer host",
+      "input": "see acme.corp.example now",
+      "output": "see HOST_247145d1 now",
+      "hits": [
+        {
+          "token": "HOST_247145d1",
+          "type": "HOST",
+          "source": "internalHost"
+        }
+      ],
+      "restored": "see acme.corp.example now"
+    },
+    {
       "name": "caseSensitive without compound",
       "input": "ABC runs; abc does not match",
       "output": "PROCESS_44b71c93 runs; abc does not match",

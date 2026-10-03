@@ -77,6 +77,15 @@ const CASES = [
   ['product code', 'unit WIDGET-800 failed'],
   ['compound matches inside a code identifier', 'new AcmeClient(); ACME_TIMEOUT; acme_x; Acme'],
   ['compound leaves an unlisted spelling alone', 'AcMe stays as written'],
+
+  /* A compound literal must not win a position where a LONGER pattern also
+   * starts. `Acme` used to beat the email pattern here and tokenize four
+   * characters, sending the domain upstream in clear; the lowercase form was
+   * worse, because the exact-case check rejected the literal AFTER it had
+   * consumed the position, so the whole address went through untouched.
+   * Both spellings are pinned because they failed differently. */
+  ['compound literal must not swallow a longer email', 'mail acme@partner.example and Acme@partner.example'],
+  ['compound literal must not swallow a longer host', 'see acme.corp.example now'],
   ['caseSensitive without compound', 'ABC runs; abc does not match'],
   ['allow-list beats an identifier', 'kern and bank and post are ordinary words'],
   ['allow-list does not block unrelated hits', 'kern at 10.0.0.5'],
