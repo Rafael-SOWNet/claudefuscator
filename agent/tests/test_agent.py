@@ -218,6 +218,15 @@ def test_it_refuses_to_start_without_a_config(monkeypatch, tmp_path):
     monkeypatch.setenv('CLAUDEFUSCATOR_KEY', KEY)
     monkeypatch.delenv('CLAUDEFUSCATOR_CONFIG', raising=False)
     monkeypatch.chdir(tmp_path)
+
+    # Point HOME at an empty directory too. The last candidate build_store
+    # tries is ~/.claudefuscator/identifiers.json, so without this the test
+    # passes or fails depending on whether whoever runs it happens to use
+    # the tool - it went red the moment a real config appeared in a home
+    # directory, which is the wrong reason for a test to change colour.
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('USERPROFILE', str(tmp_path))
+
     args = type('A', (), {'config': None, 'cache': str(tmp_path / 'c.json')})()
     store, status = agent.build_store(args)
     assert store is None

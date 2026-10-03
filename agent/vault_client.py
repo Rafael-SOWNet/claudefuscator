@@ -31,6 +31,7 @@ file, a log line or a tool argument.
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import vault_crypto as vc
@@ -59,6 +60,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 USER_AGENT = 'claudefuscator-agent'
+
+# Exact hostnames, compared after parsing. Never prefix-matched - see
+# from_config for the address that defeats a prefix test.
+LOOPBACK_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
 DEFAULT_TIMEOUT = 8
 MAX_BATCH = 500             # matches the server's per-request cap
 
@@ -91,11 +96,20 @@ class VaultClient:
             return None, 'no vault.url set'
 
         # Plain http would put the bearer token and the ciphertext on the
-        # wire in clear. Loopback is allowed so the server can be exercised
+        # wire in clear. Loopback is allowed so a server can be exercised
         # locally; nothing else is.
-        if not url.startswith('https://'):
-            if not url.startswith(('http://127.0.0.1', 'http://localhost')):
-                return None, f'vault.url must be https, refusing {url}'
+        #
+        # Checked on the PARSED HOSTNAME, not as a prefix of the string. A
+        # prefix test accepts http://127.0.0.1.evil.example - a perfectly
+        # ordinary hostname that merely starts with the right characters -
+        # and the agent would then send `Authorization: Bearer <token>` and
+        # vault ciphertext, unencrypted, to whoever owns evil.example.
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return None, f'vault.url must be http or https, refusing {url}'
+        if parsed.scheme == 'http' and parsed.hostname not in LOOPBACK_HOSTS:
+            return None, (f'vault.url must be https unless it is loopback, '
+                          f'refusing {url}')
 
         token = os.environ.get('CLAUDEFUSCATOR_VAULT_TOKEN', '').strip()
         if not token:

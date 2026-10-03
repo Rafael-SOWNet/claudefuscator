@@ -149,6 +149,39 @@ def test_the_bearer_token_is_sent_and_the_key_is_not(vault):
     assert KEY not in json.dumps(fake.seen)
 
 
+@pytest.mark.parametrize('url', [
+    'http://127.0.0.1.evil.example',
+    'http://localhost.evil.example/api',
+    'http://127.0.0.1evil.example',
+    'http://127.0.0.1@evil.example',
+])
+def test_a_hostname_that_merely_starts_like_loopback_is_refused(url, monkeypatch):
+    """The loopback exemption was a prefix test on the URL string, so any
+    hostname beginning with those characters passed - an ordinary domain
+    somebody else owns. The agent would then have sent the bearer token and
+    vault ciphertext to it, unencrypted. Checked on the parsed hostname now.
+    """
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', 'aiplatform_pat_secret')
+    client, status = VaultClient.from_config({'vault': {'url': url}}, KEY)
+    assert client is None, f'{url} was accepted'
+    assert 'https' in status or 'loopback' in status
+
+
+@pytest.mark.parametrize('url', [
+    'http://127.0.0.1:8091', 'http://localhost:8091', 'http://[::1]:8091',
+    'https://vault.example.com',
+])
+def test_real_loopback_and_any_https_are_still_accepted(url, monkeypatch):
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', 'aiplatform_pat_secret')
+    client, _ = VaultClient.from_config({'vault': {'url': url}}, KEY)
+    assert client is not None, f'{url} should be usable'
+
+
+def test_a_non_http_scheme_is_refused(monkeypatch):
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', 'aiplatform_pat_secret')
+    assert VaultClient.from_config({'vault': {'url': 'ftp://x/'}}, KEY)[0] is None
+
+
 def test_plain_http_to_a_remote_host_is_refused():
     """The bearer token would be on the wire in clear."""
     client, status = VaultClient.from_config(
