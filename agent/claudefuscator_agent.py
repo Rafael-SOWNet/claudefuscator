@@ -338,14 +338,89 @@ def build_store(args):
                    f'config: {source}; vault: {vault_status})')
 
 
+def publish_identifiers(args):
+    """Seal a local file and publish it as the shared identifier list.
+
+    Here rather than on the web page that composes the list, because
+    sealing needs the key and a server able to seal could read everything
+    it stores. The agent is the component that holds the key, so the agent
+    is what publishes.
+    """
+    key = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    if not key:
+        print('No CLAUDEFUSCATOR_KEY set; nothing can be sealed.', file=sys.stderr)
+        return 2
+
+    if args.version is None:
+        print('--version is required. It has to increase on every publish: the '
+              'vault refuses one that does not, and the envelope binds it so an '
+              'older list cannot be replayed as the current one.', file=sys.stderr)
+        return 2
+
+    try:
+        with open(args.publish_identifiers, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except OSError as e:
+        print(f'Could not read {args.publish_identifiers}: {e}', file=sys.stderr)
+        return 2
+
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as e:
+        # Refused here rather than discovered by every agent that fetches
+        # it. A published list that does not parse leaves everyone on their
+        # local config, which looks exactly like nobody having published.
+        print(f'{args.publish_identifiers} is not valid JSON: {e}', file=sys.stderr)
+        return 2
+
+    raw = None
+    for candidate in (args.config, os.environ.get('CLAUDEFUSCATOR_CONFIG'),
+                      os.path.join(os.getcwd(), 'claudefuscator.local.json'),
+                      os.path.expanduser('~/.claudefuscator/identifiers.json')):
+        if candidate and os.path.exists(candidate):
+            try:
+                with open(candidate, 'rb') as f:
+                    raw = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            break
+
+    client, status = VaultClient.from_config(raw or {}, key)
+    if client is None:
+        print(f'No vault to publish to: {status}', file=sys.stderr)
+        return 2
+
+    ok, err = client.publish_identifiers(text, args.version)
+    if not ok:
+        print(f'Not published: {err}', file=sys.stderr)
+        return 1
+
+    print(f'Published version {args.version} ({len(text)} bytes, sealed).')
+    print('Agents pick it up on their next fetch; nothing here can read it back '
+          'without the key.')
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='Claudefuscator local agent')
     parser.add_argument('--port', type=int, default=int(os.environ.get('CLAUDEFUSCATOR_AGENT_PORT', DEFAULT_PORT)))
     parser.add_argument('--config', help='identifier list; defaults to CLAUDEFUSCATOR_CONFIG')
+    parser.add_argument(
+        '--publish-identifiers', metavar='FILE',
+        help='seal FILE and publish it as the shared identifier list, then exit. '
+             'Needs the ManageIdentifiers role.')
+    parser.add_argument(
+        '--version', type=int, metavar='N',
+        help='version for --publish-identifiers. Must increase: the vault '
+             'refuses one that does not, and the envelope binds it so an '
+             'older list cannot be replayed as the current one.')
     parser.add_argument('--cache', default=os.environ.get(
         'CLAUDEFUSCATOR_CACHE', os.path.expanduser('~/.claudefuscator/discovered.json')),
         help='where discovered values persist. Holds real values in plaintext.')
     args = parser.parse_args()
+
+    if args.publish_identifiers:
+        return publish_identifiers(args)
 
     store, status = build_store(args)
     if store is None:
