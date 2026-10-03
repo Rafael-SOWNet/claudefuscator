@@ -323,6 +323,8 @@ claudefuscator/
 │   └── TESTING.md
 ├── agent/                         loopback unveil service (see below)
 │   └── claudefuscator_agent.py
+├── server/                        reference vault (ASP.NET Core + SQLite)
+│   └── README.md                  why a second implementation exists
 └── e2e/                           headless browser test of the extension
 ```
 
@@ -509,6 +511,7 @@ npm test          # JS core + parity vectors          (110 tests)
 npm run test:py   # Python: proxy, veil, agent, vault  (185 passed, 2 xfailed)
 npm run e2e       # headless browser, real extension  (20 checks)
 npm run test:all  # all three
+npm run test:server # reference vault server (needs the .NET SDK; not in test:all)
 ```
 
 Per-surface verification notes, with commands:

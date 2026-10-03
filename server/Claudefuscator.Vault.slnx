@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Claudefuscator.Vault/Claudefuscator.Vault.csproj" />
+  <Project Path="tests/Claudefuscator.Vault.Tests/Claudefuscator.Vault.Tests.csproj" />
+</Solution>

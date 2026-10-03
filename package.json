@@ -14,7 +14,8 @@
     "e2e:headed": "node e2e/run-extension-e2e.js --headed",
     "test:all": "npm test && npm run test:py && npm run e2e && npm run test:mod",
     "validate-plugin": "claude plugin validate ./claude-plugin",
-    "test:mod": "node tools/run-mod-tests.js"
+    "test:mod": "node tools/run-mod-tests.js",
+    "test:server": "dotnet test server/Claudefuscator.Vault.slnx --nologo"
   },
   "engines": {
     "node": ">=18"

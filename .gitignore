@@ -75,3 +75,9 @@ proxy/logs/
 # is belt and braces for a local export script someone writes anyway.
 *vault-token*
 .env.vault
+
+# Reference server build output and local state
+server/**/bin/
+server/**/obj/
+server/**/*.db
+server/**/tokens.json
