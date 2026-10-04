@@ -84,6 +84,10 @@ never sit on disk in plaintext when avoidable — see the working rules below.
   Code. Rewrites `prompt.submit`, `prompt.section`, `prompt.compose`,
   `prompt.context`, `skill.prompt`, `prompt.attachment`, `tool.describe`,
   `tool.call` and `ui.render`. Needs Claude Code **v2.1.287+**.
+  It can run with **nothing configured**: when it has no key or no
+  identifier list of its own it asks the local agent, which holds both.
+  Asked for last, so an explicit `secret_key` or `config_path` still
+  wins — see the agent bootstrap rule below.
 - **Proxy mode** (`proxy/`): scrubs the whole `/v1/messages` body outbound
   and restores the response inbound. Its coverage is *structural*; the mod's
   is enumerated. **No longer the path to recommend for Claude Code** — it
@@ -377,6 +381,35 @@ org/product/process vocabulary) -> **identifiers** (project list) ->
     goes in `chrome.storage.local`, because without a server there is
     nowhere else for it to come from; one that was collected must never be
     written back there. The e2e asserts both halves.
+- **The agent bootstrap is guarded by a file, not by nothing.** The mod
+  collects its key and list from the agent's `GET /bootstrap`, which
+  cannot use the `x-claudefuscator-auth` proof-of-key header every other
+  agent route uses — the caller is asking for the key that header is
+  built from. The guard is a per-run token the agent writes to
+  `~/.claudefuscator/agent.json` with owner-only permissions.
+  - That keeps the bar where it already was: whoever can read that file
+    can read the DPAPI-protected vault credential beside it and collect
+    the key themselves. Do not "simplify" it into an unauthenticated
+    loopback route, which would lower it to *any local process*.
+  - **The fetch must stay bounded.** `$.http.fetch` has no timeout and
+    every hook awaits loading, so an unbounded call there hangs the
+    prompt for ever. A stale handshake naming a dead port is ordinary —
+    a killed agent cannot clean up after itself — so this is a case that
+    happens, not a hypothetical. It races `$.clock.sleep`, and the
+    timeout arm swallows its own rejection so a refusing clock means
+    "give up safely", never "hang".
+  - `$.http.fetch` resolves a plain `{ status, ok, headers, text }`.
+    There is no `json()`; calling one throws into the catch and becomes
+    a silent "no agent", which scrubs nothing while reporting nothing
+    wrong.
+- **The agent's lifetime is the operating system's job**, not the mod's.
+  `tools/windows/install-autostart.ps1` registers a logon task. The mod
+  must never spawn it: the extension needs the agent when Claude Code is
+  not running, and a privacy tool that starts processes is a capability
+  an auditor reading `claude plugin validate` should not have to weigh.
+  The task runs **interactively**, not S4U — an S4U logon cannot decrypt
+  the user's DPAPI master key, so the agent would start, fail to open its
+  credential, and run without a vault while looking healthy.
 - **The content script must never write into an editable region.** Restoring a
   token inside the claude.ai composer would put the real value into the box the
   user is about to send. The skip list in `content.js` is a safety control, not

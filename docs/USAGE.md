@@ -97,20 +97,51 @@ the mod, which is the argument for one place rather than two — but if you
 would rather the key never touch disk, export it per shell and the agent
 will prefer it.
 
-Then three steps on top of local mode:
+Then, on each machine:
 
 ```bash
-# 1. a personal API token, created in the server's UI, kept out of files
-export CLAUDEFUSCATOR_VAULT_TOKEN='…'
+# 1. approve this agent in the browser. You sign in there; no credential
+#    is ever shown to you or pasted anywhere.
+python agent/claudefuscator_agent.py --connect
 
-# 2. publish the list everyone should use (needs the manage-identifiers role)
+# 2. start it at logon, so the browser extension and the mod both find it
+powershell -ExecutionPolicy Bypass -File tools/windows/install-autostart.ps1
+
+# 3. check what this machine is actually working with
+python agent/claudefuscator_agent.py --status
+```
+
+Once, for the organisation rather than per machine:
+
+```bash
+# publish the list everyone should use (needs the manage-identifiers role)
 python agent/claudefuscator_agent.py \
   --publish-identifiers claudefuscator.merged.local.json --version 7
 
-# 3. optional: enrol your key, so your browsers collect it instead of
-#    being typed into. Read the trade-off first - docs/UNVEIL-SERVER.md.
+# enrol the key, so every machine collects it instead of being told it.
+# Prompts for it; nothing is exported or pasted into a shell.
+# Read the trade-off first - docs/UNVEIL-SERVER.md.
 python agent/claudefuscator_agent.py --enrol-key
 ```
+
+After that a new machine needs **step 1 and 2 and nothing else**. No key,
+no identifier list, no `secret_key`, no `config_path`: the agent collects
+both from the server and the mod collects them from the agent.
+
+`--status` is how you check that, and it exits non-zero when the machine
+would not actually scrub:
+
+```
+Key          : from the vault, fingerprint ad412e6e
+Identifiers  : …/.claudefuscator/identifiers.json
+Vault        : https://ai.example.com
+Credential   : stored (Windows DPAPI, tied to this user account)
+Enrolled key : matches this machine (ad412e6e)
+```
+
+That last line is the one to read. Two different keys both scrub and both
+look fine, and neither side can resolve the other's tokens — which
+presents as the vault losing data rather than as two keys being in play.
 
 and in the config file, the vault's address (the token never goes here):
 
