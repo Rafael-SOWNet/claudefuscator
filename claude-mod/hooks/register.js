@@ -26,6 +26,16 @@ import {
   readAgentConfig, pendingMappings, agentAuthHeader,
 } from './veil.js';
 
+/* How long to wait for the local agent to hand over a key and a list.
+ *
+ * Short on purpose. This runs before the first prompt is scrubbed, so
+ * every millisecond is one the person is waiting; and the fallback -
+ * running inert and saying so loudly - is a far better outcome than a
+ * prompt that never returns. $.http.fetch has no timeout of its own,
+ * which is the whole reason this constant exists.
+ */
+const AGENT_TIMEOUT_MS = 2000;
+
 /* Shared by every hook in this module, which is how a mod keeps state. */
 let vault = null;
 let status = 'INACTIVE (not initialised)';
@@ -112,6 +122,75 @@ function scheduleFlush($) {
   });
 }
 
+/* Collect the key and the identifier list from the local agent.
+ *
+ * This is what lets a machine configure nothing: the agent connects to
+ * the vault, unwraps the enrolled key, and hands both over loopback.
+ *
+ * WHY A HANDSHAKE FILE RATHER THAN A FIXED PORT
+ *
+ * /bootstrap cannot use the proof-of-key header every other agent route
+ * uses, because the caller is asking for the key that header is built
+ * from. The guard is a token the agent wrote to a file only this user can
+ * read - which keeps the bar where it already was, since whoever can read
+ * that file can read the vault credential beside it and collect the key
+ * themselves. An unauthenticated loopback route would have lowered it to
+ * "any local process".
+ *
+ * BOUNDED, BECAUSE THIS IS ON THE CRITICAL PATH
+ *
+ * $.http.fetch has no timeout and every hook awaits loading. A wedged or
+ * dead agent would otherwise hang the prompt for ever - and a stale
+ * handshake file naming a port nothing is listening on is an ordinary
+ * occurrence, since an agent that is killed cannot clean up after itself.
+ * So the fetch races a clock and loses after two seconds. Failing here
+ * costs the scrubbing, which is loud; hanging costs the session.
+ */
+async function collectFromAgent($, homeDir) {
+  if (!homeDir) return null;
+
+  let handshake = null;
+  try {
+    const text = await $.fs.read(homeDir + '/.claudefuscator/agent.json');
+    if (!text) return null;
+    handshake = JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+
+  if (!handshake || !handshake.port || !handshake.token) return null;
+
+  const url = 'http://127.0.0.1:' + handshake.port + '/bootstrap';
+
+  try {
+    /* The timeout arm swallows its own rejection. If the clock refuses,
+     * this resolves null and the collection is abandoned - which is the
+     * safe direction: without a working clock there is nothing bounding
+     * the fetch, and an unbounded fetch on the critical path can hang the
+     * prompt. Letting the rejection propagate instead would abandon the
+     * attempt too, but by way of an exception that reads like a failure
+     * of the agent. */
+    const answer = await Promise.race([
+      $.http.fetch(url, { headers: { 'x-claudefuscator-bootstrap': handshake.token } }),
+      $.clock.sleep(AGENT_TIMEOUT_MS).then(() => null, () => null),
+    ]);
+
+    if (!answer || !answer.ok) return null;
+
+    /* $.http.fetch resolves a plain { status, ok, headers, text } - not a
+     * Response, and with no json(). Calling one threw, and the catch
+     * below turned that into a silent "no agent", which is exactly the
+     * shape of bug this project cannot afford: it scrubbed nothing and
+     * said nothing was wrong. */
+    const body = JSON.parse(answer.text);
+    if (!body || !body.key) return null;
+
+    return { key: body.key, config: body.config || null };
+  } catch (_) {
+    return null;
+  }
+}
+
 async function load($) {
   let key = (options && options.secret_key) || null;
   if (!key) {
@@ -148,6 +227,26 @@ async function load($) {
       return;
     }
     break;
+  }
+
+  /* Nothing configured here? Ask the agent, which may have both.
+   *
+   * Last, not first, so an explicit local setting always wins. Someone
+   * who put a key in the plugin config or a list on disk meant it, and
+   * silently preferring what a service handed over would make the
+   * setting they are looking at a lie.
+   *
+   * Asked for only when something is actually missing, so the ordinary
+   * fully-configured case costs no round trip at all.
+   */
+  if (!key || !rawConfig) {
+    const collected = await collectFromAgent($, homeDir);
+    if (collected) {
+      if (!key) key = collected.key;
+      if (!rawConfig && collected.config) {
+        rawConfig = { config: collected.config, source: 'the local agent' };
+      }
+    }
   }
 
   const packs = new Map();

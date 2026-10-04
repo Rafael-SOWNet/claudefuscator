@@ -43,6 +43,7 @@ import os
 import pathlib
 import secrets
 import socket
+import stat
 import sys
 import threading
 import urllib.error
@@ -214,6 +215,13 @@ class Handler(BaseHTTPRequestHandler):
     server_version = 'claudefuscator-agent'
     sys_version = ''                        # do not advertise the Python version
 
+    # What /bootstrap hands out, and the per-run token that guards it.
+    # Held in memory only; the token also goes to a user-only file so the
+    # mod can find it, the key and the list never do.
+    bootstrap_token = None
+    bootstrap_key = None
+    bootstrap_config = None
+
     def log_message(self, fmt, *args):
         # One line per request, without the resolved tokens.
         sys.stderr.write('%s - %s\n' % (self.address_string(), fmt % args))
@@ -274,6 +282,34 @@ class Handler(BaseHTTPRequestHandler):
                 'discovered': discovered,
             })
             return
+
+        if self.path == '/bootstrap':
+            # Hands the mod the key and the identifier list, so a machine
+            # can run with neither configured locally.
+            #
+            # NOT guarded by the usual proof-of-key header, because the
+            # caller is asking for the very key that header is built from.
+            # The guard is instead a token this run wrote to a file only
+            # this user can read, which keeps the bar exactly where it
+            # already was: anyone who can read that file can read the
+            # stored vault credential beside it and collect the key
+            # themselves anyway.
+            #
+            # Per run, so it is not a standing credential, and never
+            # logged.
+            presented = self.headers.get(BOOTSTRAP_HEADER) or ''
+            if not Handler.bootstrap_token or not hmac.compare_digest(
+                    presented, Handler.bootstrap_token):
+                self._json(403, {'error': 'bad or missing ' + BOOTSTRAP_HEADER})
+                return
+
+            self._json(200, {
+                'key': Handler.bootstrap_key,
+                'config': Handler.bootstrap_config,
+                'tokenVersion': core.TOKEN_VERSION,
+            })
+            return
+
         self._json(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -527,6 +563,50 @@ def load_config(explicit=None):
             return json.load(f)
     except (OSError, json.JSONDecodeError, ValueError):
         return {}
+
+
+HANDSHAKE_PATH = os.path.join(
+    os.path.expanduser('~'), '.claudefuscator', 'agent.json')
+BOOTSTRAP_HEADER = 'x-claudefuscator-bootstrap'
+
+
+def write_handshake(port):
+    """Tell the mod where this agent is and how to ask it for a key.
+
+    A file rather than a fixed convention, because the thing that needs
+    protecting is not the port - it is the right to call /bootstrap. The
+    token in here is generated per run and is the only credential for
+    that route.
+
+    Putting it in a file keeps the bar exactly where it already was:
+    whoever can read this file can read the stored vault credential
+    sitting beside it, and could collect the key themselves. It does not
+    lower the bar to "any local process", which an unauthenticated
+    loopback route would have done.
+
+    Returns the token, or None if it could not be written - in which case
+    the agent still serves everything else and says the bootstrap is off.
+    """
+    token = secrets.token_urlsafe(32)
+    try:
+        os.makedirs(os.path.dirname(HANDSHAKE_PATH), exist_ok=True)
+        handle = os.open(
+            HANDSHAKE_PATH,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(handle, 'w', encoding='utf-8') as f:
+            json.dump({'port': port, 'token': token}, f)
+    except OSError:
+        return None
+    return token
+
+
+def clear_handshake():
+    """Remove the handshake file. Best effort."""
+    try:
+        os.remove(HANDSHAKE_PATH)
+    except OSError:
+        pass
 
 
 def fingerprint(key):
@@ -1043,13 +1123,31 @@ def main():
     print(f'Claudefuscator agent: {status}')
     print(f'Listening on http://127.0.0.1:{args.port} (loopback only)')
 
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    # What the mod will collect, so it needs nothing configured itself.
+    key, key_source = resolve_key(args.key)
+    Handler.bootstrap_key = key
+    Handler.bootstrap_config = load_config(args.config)
+    Handler.bootstrap_token = write_handshake(args.port)
+
+    if Handler.bootstrap_token:
+        print(f'Mod bootstrap: ready (key from {key_source})')
+    else:
+        print('Mod bootstrap: UNAVAILABLE - the mod will need its own key '
+              'and identifier list.', file=sys.stderr)
+
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
     finally:
-        server.server_close()
+        # The handshake names a port and a token for a process that is no
+        # longer listening. Left behind, the mod would spend its startup
+        # budget on a connection that cannot be made.
+        clear_handshake()
     return 0
 
 
