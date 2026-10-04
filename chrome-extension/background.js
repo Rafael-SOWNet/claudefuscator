@@ -86,12 +86,31 @@ function allowedOrigins() {
   return out;
 }
 
+/* Returns { url } or { reason }. Same three-faults-one-message problem
+ * vaultOrigin had: "no agent section" and "that origin is not permitted"
+ * are different problems with different fixes, and reporting both as the
+ * latter points at the manifest when the config is what is empty. */
 function agentUrl(config) {
   const raw = config && config.agent;
-  if (!raw || typeof raw !== 'object' || raw.enabled === false) return null;
+
+  if (!raw || typeof raw !== 'object') {
+    return { reason: 'your identifier list has no "agent" section, so values '
+      + 'this extension cannot derive stay as tokens. Add '
+      + '{"agent": {"url": "http://127.0.0.1:8091"}} and press Save.' };
+  }
+  if (raw.enabled === false) {
+    return { reason: 'the agent is turned off in your config ("enabled": false).' };
+  }
+
   const url = typeof raw.url === 'string' ? raw.url.trim().replace(/\/$/, '') : '';
-  if (!url) return null;
-  return allowedOrigins().includes(url) ? url : null;
+  if (!url) return { reason: 'your "agent" section has no "url".' };
+
+  if (!allowedOrigins().includes(url)) {
+    return { reason: `this extension may not reach ${url}. It may reach: `
+      + allowedOrigins().join(', ') + '.' };
+  }
+
+  return { url };
 }
 
 /* Same construction as the agent's, the proxy's and the mod's: proof that
@@ -189,14 +208,9 @@ async function resolve(tokens) {
   if (held.reason) return { mappings: {}, reason: held.reason };
   const key = held.key;
   if (!config) return { mappings: {}, reason: 'not configured' };
-  const url = agentUrl(config);
-  if (!url) {
-    return {
-      mappings: {},
-      reason: 'the configured agent url is not one this extension may reach: '
-        + allowedOrigins().join(', '),
-    };
-  }
+  const where = agentUrl(config);
+  if (where.reason) return { mappings: {}, reason: where.reason };
+  const url = where.url;
   if (!Array.isArray(tokens) || !tokens.length) return { mappings: {} };
 
   /* A wedged agent must not leave the page waiting for its unveiling. */
