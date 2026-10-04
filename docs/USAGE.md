@@ -78,15 +78,34 @@ and `CLAUDEFUSCATOR_CONFIG`, paste the same key and list into the extension,
 done. Everything in sections 2–5 applies as written.
 
 **Central vault mode** adds a server so the list is governed in one place
-and browsers stop asking people to retype the key. Three steps on top of
-local mode:
+and browsers stop asking people to retype the key.
+
+First, where the key comes from. The agent looks in two places, in order:
+
+1. `CLAUDEFUSCATOR_KEY` in the environment
+2. `secret_key` in the **Claude Code plugin config** — the same setting the
+   mod reads, so one entry serves both
+
+Set the second from inside Claude Code (`/plugin`, pick claudefuscator,
+then configure) and nothing needs exporting per shell. The agent takes
+`config_path` from there too, so it works on the same identifier list the
+mod does rather than a second copy that can drift from it.
+
+The trade, once: a key in the plugin config sits on disk in plaintext,
+where an exported one lives only in that process. That is already true of
+the mod, which is the argument for one place rather than two — but if you
+would rather the key never touch disk, export it per shell and the agent
+will prefer it.
+
+Then three steps on top of local mode:
 
 ```bash
 # 1. a personal API token, created in the server's UI, kept out of files
 export CLAUDEFUSCATOR_VAULT_TOKEN='…'
 
 # 2. publish the list everyone should use (needs the manage-identifiers role)
-python agent/claudefuscator_agent.py \n  --publish-identifiers claudefuscator.merged.local.json --version 7
+python agent/claudefuscator_agent.py \
+  --publish-identifiers claudefuscator.merged.local.json --version 7
 
 # 3. optional: enrol your key, so your browsers collect it instead of
 #    being typed into. Read the trade-off first - docs/UNVEIL-SERVER.md.
