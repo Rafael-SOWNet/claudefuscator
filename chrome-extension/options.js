@@ -173,9 +173,20 @@
   }
 
   el.save.addEventListener('click', async () => {
-    const key = await workingKey();
-    if (!key) return;
-
+    /* Parse first, store second, THEN find a key.
+     *
+     * The old order deadlocked anyone setting up vault mode for the first
+     * time: it asked for a key before storing anything, collecting a key
+     * needs the vault url, and the vault url was sitting unsaved in the
+     * textarea. Save could therefore never succeed, and said the config
+     * had no vault section while the section was on screen.
+     *
+     * Storing before validating costs little - the config is this page's
+     * own field, and a config that does not build is reported below and
+     * can be corrected - whereas a config that cannot be saved until it
+     * works, and cannot work until it is saved, cannot be corrected at
+     * all.
+     */
     let cfg;
     try {
       cfg = parseConfig(el.config.value);
@@ -183,21 +194,30 @@
       return say(err.message, 'err');
     }
 
-    /* Build the vault before saving so a token collision or bad entry is
-     * caught here rather than silently producing wrong restores later. */
-    try {
-      await core.buildVault(key, cfg);
-    } catch (err) {
-      return say(err.message, 'err');
-    }
-
-    /* Only a key that was typed here is stored. One collected from the
+    /* Only a key that was TYPED here is stored. One collected from the
      * vault is deliberately left out: it belongs to this browser session
      * and writing it to disk would quietly undo the point of enrolment. */
     const stored = { config: cfg, highlight: el.highlight.checked,
                      vaultToken: el.vaultToken.value.trim() };
     if (el.key.value.trim()) stored.key = el.key.value.trim();
     await chrome.storage.local.set(stored);
+
+    const key = await workingKey();
+    if (!key) {
+      // Saved, but inert. Say both halves: the settings are not lost, and
+      // nothing is being scrubbed until a key turns up.
+      return say('Settings saved, but there is no key yet, so nothing will '
+        + 'be unveiled. See the message above.', 'err');
+    }
+
+    /* Build the vault now so a token collision or bad entry is caught
+     * here rather than silently producing wrong restores later. */
+    try {
+      await core.buildVault(key, cfg);
+    } catch (err) {
+      return say(err.message, 'err');
+    }
+
     await showKeyState(key);
     say('Saved locally. Open tabs pick this up without a reload.', 'ok');
   });
