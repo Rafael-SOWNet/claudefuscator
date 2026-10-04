@@ -491,7 +491,14 @@ token** instead, with the vault's url in the identifier-list JSON:
 { "identifiers": [], "vault": { "url": "https://ai.example.com" } }
 ```
 
-Press **Collect key and shared list now**. The extension fetches the list
+First, one edit the options page cannot make for you: add your server's
+origin to `host_permissions` in `manifest.json` (it ships with the
+placeholder `https://ai.example.com/*`) and to the `connect-src` beside it,
+then reload the extension. This is deliberately a manifest change rather
+than a config field — widening where the extension may send real values
+should not be something a settings page, or a server, can do.
+
+Then press **Collect key and shared list now**. The extension fetches the list
 and unwraps the key you enrolled with `--enrol-key`, and holds both in
 memory for this browser session — nothing is written to disk, and closing
 the browser discards them. The next session collects them again.
