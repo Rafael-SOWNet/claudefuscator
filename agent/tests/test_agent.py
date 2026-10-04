@@ -208,10 +208,23 @@ def test_it_refuses_to_start_without_a_key(monkeypatch, tmp_path):
     """A silently empty agent looks exactly like a working one from the
     browser's side, so it must not start at all."""
     monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    # Pinned to an empty home as well as an empty environment. The agent now
+    # also reads the Claude Code plugin config, so on a machine where that
+    # carries a key this would quietly pass by starting successfully - which
+    # is the opposite of what it claims to check.
+    import importlib
+    empty_home = tmp_path / 'home'
+    (empty_home / '.claude').mkdir(parents=True)
+    monkeypatch.setenv('HOME', str(empty_home))
+    monkeypatch.setenv('USERPROFILE', str(empty_home))
+    mod = importlib.reload(agent)
+
     args = type('A', (), {'config': None, 'cache': str(tmp_path / 'c.json')})()
-    store, status = agent.build_store(args)
+    store, status = mod.build_store(args)
     assert store is None
-    assert 'no CLAUDEFUSCATOR_KEY' in status
+    # Names both places it looked, so somebody who set the other one can
+    # tell why nothing happened.
+    assert 'environment' in status and 'plugin config' in status
 
 
 def test_it_refuses_to_start_without_a_config(monkeypatch, tmp_path):
@@ -297,3 +310,89 @@ def test_the_agent_agrees_with_the_committed_vectors():
     for t in vectors['tokens']:
         assert store.resolve([t['token']]).get(t['token']) == t['value'], \
             f'the agent cannot resolve {t["token"]}'
+
+
+# ---- where the key comes from ----------------------------------------
+#
+# The mod reads options.secret_key before the environment. The agent has to
+# agree, or one of them scrubs with a key the other does not have and the
+# failure shows up as tokens that will not resolve.
+
+def _settings(tmp_path, options):
+    import json as _json
+    home = tmp_path / 'home'
+    (home / '.claude').mkdir(parents=True)
+    (home / '.claude' / 'settings.json').write_text(_json.dumps({
+        'pluginConfigs': {'claudefuscator@claudefuscator': {'options': options}}
+    }), encoding='utf-8')
+    return home
+
+
+def _reload(monkeypatch, home):
+    """Re-import the agent so CLAUDE_SETTINGS picks up the fake home."""
+    import importlib
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('USERPROFILE', str(home))
+    return importlib.reload(agent)
+
+
+def test_the_key_is_read_from_the_claude_plugin_config(tmp_path, monkeypatch):
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    mod = _reload(monkeypatch, _settings(tmp_path, {'secret_key': 'from-plugin-config'}))
+
+    key, source = mod.resolve_key()
+    assert key == 'from-plugin-config'
+    # The source is printed; it must name the place, never the value.
+    assert 'plugin config' in source
+    assert 'from-plugin-config' not in source
+
+
+def test_the_environment_wins_over_the_plugin_config(tmp_path, monkeypatch):
+    mod = _reload(monkeypatch, _settings(tmp_path, {'secret_key': 'from-plugin-config'}))
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', 'from-environment')
+
+    # An explicitly exported key is the one somebody meant right now.
+    key, source = mod.resolve_key()
+    assert key == 'from-environment'
+    assert source == 'CLAUDEFUSCATOR_KEY'
+
+
+def test_no_key_anywhere_is_reported_not_guessed(tmp_path, monkeypatch):
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    mod = _reload(monkeypatch, _settings(tmp_path, {}))
+
+    key, source = mod.resolve_key()
+    assert key is None and source is None
+    # The message has to say both places, or somebody sets the one the
+    # agent is not reading and cannot tell why nothing happened.
+    assert 'CLAUDEFUSCATOR_KEY' in mod.NO_KEY
+    assert 'secret_key' in mod.NO_KEY
+
+
+def test_an_empty_secret_key_counts_as_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    mod = _reload(monkeypatch, _settings(tmp_path, {'secret_key': '   '}))
+
+    # Whitespace would otherwise build a vault that derives tokens nothing
+    # else derives - scrubbing, but to values no colleague can resolve.
+    assert mod.resolve_key() == (None, None)
+
+
+def test_the_identifier_list_is_found_through_the_plugin_config(tmp_path, monkeypatch):
+    monkeypatch.delenv('CLAUDEFUSCATOR_CONFIG', raising=False)
+    listing = tmp_path / 'shared-list.json'
+    listing.write_text('{"identifiers": []}', encoding='utf-8')
+    mod = _reload(monkeypatch, _settings(tmp_path, {'config_path': str(listing)}))
+
+    # The agent and the mod must agree on WHICH list is in force.
+    assert mod.resolve_config_path() == str(listing)
+
+
+def test_an_explicit_config_beats_the_plugin_config(tmp_path, monkeypatch):
+    chosen = tmp_path / 'chosen.json'
+    chosen.write_text('{"identifiers": []}', encoding='utf-8')
+    other = tmp_path / 'other.json'
+    other.write_text('{"identifiers": []}', encoding='utf-8')
+    mod = _reload(monkeypatch, _settings(tmp_path, {'config_path': str(other)}))
+
+    assert mod.resolve_config_path(str(chosen)) == str(chosen)

@@ -300,9 +300,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_store(args):
-    key = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    key, _source = resolve_key()
     if not key:
-        return None, 'no CLAUDEFUSCATOR_KEY set'
+        return None, 'no key set, in the environment or the Claude Code plugin config'
 
     candidates = [
         args.config,
@@ -341,6 +341,108 @@ def build_store(args):
 FINGERPRINT_LABEL = 'claudefuscator/fingerprint/v1'
 
 
+# Claude Code keeps a mod's userConfig here, and the mod reads its key from
+# `options.secret_key` before falling back to the environment. The agent
+# reads the same place, in the same order, so one setting serves both and
+# nobody has to keep an environment variable and a config entry in step.
+#
+# Not a new copy of the key: it is the copy the mod already uses. Putting it
+# in two places would be the thing worth avoiding.
+CLAUDE_SETTINGS = os.path.join(os.path.expanduser('~'), '.claude', 'settings.json')
+PLUGIN_KEYS = ('claudefuscator@claudefuscator', 'claudefuscator')
+
+
+def _claude_plugin_options():
+    """The mod's configured options, or {}. Never raises."""
+    try:
+        with open(CLAUDE_SETTINGS, 'rb') as f:
+            settings = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+    configs = settings.get('pluginConfigs')
+    if not isinstance(configs, dict):
+        return {}
+
+    for name in PLUGIN_KEYS:
+        entry = configs.get(name)
+        if isinstance(entry, dict):
+            options = entry.get('options')
+            if isinstance(options, dict):
+                return options
+
+    # The install may be under a marketplace name this does not know. Take a
+    # single claudefuscator-looking entry rather than guessing between several.
+    candidates = [v.get('options') for k, v in configs.items()
+                  if 'claudefuscator' in k.lower()
+                  and isinstance(v, dict) and isinstance(v.get('options'), dict)]
+    return candidates[0] if len(candidates) == 1 else {}
+
+
+def resolve_key():
+    """The Claudefuscator key, and where it came from.
+
+    Returns (key, source). `source` names the place, never the value - it is
+    printed, and the key must not be.
+    """
+    from_env = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    if from_env:
+        return from_env, 'CLAUDEFUSCATOR_KEY'
+
+    configured = _claude_plugin_options().get('secret_key')
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip(), 'the Claude Code plugin config'
+
+    return None, None
+
+
+NO_KEY = (
+    'No key configured.\n'
+    '\n'
+    'The agent looks in two places, in this order:\n'
+    '  1. the CLAUDEFUSCATOR_KEY environment variable\n'
+    '  2. secret_key in the Claude Code plugin config\n'
+    '     (' + CLAUDE_SETTINGS + ', under pluginConfigs)\n'
+    '\n'
+    'The second is the same setting the mod reads, so setting it there means\n'
+    'one place rather than two. In Claude Code: /plugin, pick claudefuscator,\n'
+    'then configure, then secret_key.'
+)
+
+
+def resolve_config_path(explicit=None):
+    """Where the identifier list lives.
+
+    Prefers an explicit --config, then the environment, then the path the
+    mod is already configured with, then the conventional location. The
+    third is what makes the agent and the mod agree about which list is in
+    force without it being said twice.
+    """
+    candidates = [
+        explicit,
+        os.environ.get('CLAUDEFUSCATOR_CONFIG'),
+        _claude_plugin_options().get('config_path'),
+        os.path.join(os.getcwd(), 'claudefuscator.local.json'),
+        os.path.join(os.path.expanduser('~'), '.claudefuscator', 'identifiers.json'),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def load_config(explicit=None):
+    """The identifier list as a dict, or {}."""
+    path = resolve_config_path(explicit)
+    if not path:
+        return {}
+    try:
+        with open(path, 'rb') as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
 def print_fingerprint():
     """Say which key is configured, without saying what it is.
 
@@ -358,9 +460,9 @@ def print_fingerprint():
     the agent, so printing it would be printing a credential rather than a
     checksum.
     """
-    key = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    key, source = resolve_key()
     if not key:
-        print('No CLAUDEFUSCATOR_KEY set; nothing to fingerprint.', file=sys.stderr)
+        print(NO_KEY, file=sys.stderr)
         return 2
 
     print(f'key fingerprint: {core.hmac_hex(key, FINGERPRINT_LABEL)[:8]}  '
@@ -373,27 +475,20 @@ def print_fingerprint():
 
 def enrol_key(args):
     """Store this machine's key in the vault, wrapped under the API token."""
-    key = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    key, source = resolve_key()
     if not key:
-        print('No CLAUDEFUSCATOR_KEY set; nothing to enrol.', file=sys.stderr)
+        print(NO_KEY, file=sys.stderr)
         return 2
 
-    raw = None
-    for candidate in (args.config, os.environ.get('CLAUDEFUSCATOR_CONFIG'),
-                      os.path.join(os.getcwd(), 'claudefuscator.local.json'),
-                      os.path.expanduser('~/.claudefuscator/identifiers.json')):
-        if candidate and os.path.exists(candidate):
-            try:
-                with open(candidate, 'rb') as f:
-                    raw = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                continue
-            break
-
-    client, status = VaultClient.from_config(raw or {}, key)
+    raw = load_config(args.config)
+    client, status = VaultClient.from_config(raw, key)
     if client is None:
         print(f'No vault to enrol with: {status}', file=sys.stderr)
         return 2
+
+    # Said before the network call, so a run that cannot work is diagnosable
+    # from its own output. The source, never the key.
+    print(f'Key from {source}; vault {status}.')
 
     ok, err = client.enrol_key()
     if not ok:
@@ -424,9 +519,9 @@ def publish_identifiers(args):
     it stores. The agent is the component that holds the key, so the agent
     is what publishes.
     """
-    key = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    key, source = resolve_key()
     if not key:
-        print('No CLAUDEFUSCATOR_KEY set; nothing can be sealed.', file=sys.stderr)
+        print(NO_KEY, file=sys.stderr)
         return 2
 
     if args.version is None:
