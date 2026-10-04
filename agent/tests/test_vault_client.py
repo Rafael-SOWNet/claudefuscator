@@ -515,3 +515,60 @@ def test_nothing_enrolled_is_not_an_error(vault, monkeypatch):
     monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
     client = _client(url)
     assert client.fetch_key() is None
+
+
+# ---- a machine that holds no key at all -------------------------------
+
+def test_the_key_can_come_from_the_vault_when_nothing_is_local(vault, monkeypatch):
+    """The end state the whole connect/enrol flow exists for: a machine
+    with no key configured anywhere still scrubs, because it collects the
+    enrolled one."""
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+
+    # Somebody enrolled it once, from a machine that did have it.
+    _client(url).enrol_key()
+
+    import claudefuscator_agent as agent_mod
+    agent_mod._VAULT_KEY.clear()
+    config = {'vault': {'enabled': True, 'url': url}}
+    monkeypatch.setattr(agent_mod, 'load_config', lambda *_a, **_k: config)
+
+    key, source = agent_mod.resolve_key()
+    assert key == KEY
+    assert source == 'the vault'
+
+
+def test_enrolment_never_takes_its_input_from_the_vault(vault, monkeypatch):
+    """Otherwise --enrol-key with no local key would write back whatever
+    is already there, and report success for having changed nothing."""
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    _client(url).enrol_key()
+
+    import claudefuscator_agent as agent_mod
+    agent_mod._VAULT_KEY.clear()
+    config = {'vault': {'enabled': True, 'url': url}}
+    monkeypatch.setattr(agent_mod, 'load_config', lambda *_a, **_k: config)
+
+    assert agent_mod.resolve_key(allow_vault=False) == (None, None)
+
+
+def test_a_local_key_still_wins_over_the_enrolled_one(vault, monkeypatch):
+    """Rotation would otherwise be impossible: the machine doing the
+    rotating must be able to use its new key before publishing it."""
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    _client(url).enrol_key()
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', 'a-different-local-key')
+
+    import claudefuscator_agent as agent_mod
+    agent_mod._VAULT_KEY.clear()
+    config = {'vault': {'enabled': True, 'url': url}}
+    monkeypatch.setattr(agent_mod, 'load_config', lambda *_a, **_k: config)
+
+    key, source = agent_mod.resolve_key()
+    assert key == 'a-different-local-key'
+    assert source == 'CLAUDEFUSCATOR_KEY'

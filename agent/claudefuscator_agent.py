@@ -390,11 +390,19 @@ def _claude_plugin_options():
     return candidates[0] if len(candidates) == 1 else {}
 
 
-def resolve_key(explicit=None):
+def resolve_key(explicit=None, allow_vault=True):
     """The Claudefuscator key, and where it came from.
 
     Returns (key, source). `source` names the place, never the value - it is
     printed, and the key must not be.
+
+    Four sources, most explicit first: the --key argument, the
+    environment, the Claude Code plugin config, and finally the vault,
+    which is what lets a machine hold no key of its own at all.
+
+    `allow_vault=False` for the one caller that must not use it: enrolment
+    is about putting a LOCAL key into the vault, and taking the vault's
+    own answer as its input would just write back what is already there.
     """
     if explicit:
         # `-` means stdin: the scriptable path that keeps the key out of
@@ -422,7 +430,56 @@ def resolve_key(explicit=None):
     if isinstance(configured, str) and configured.strip():
         return configured.strip(), 'the Claude Code plugin config'
 
+    if allow_vault:
+        collected, why = _key_from_vault()
+        if collected:
+            return collected, 'the vault'
+        if why:
+            # Reported, never swallowed. "Nothing is configured" and "the
+            # vault would not give it to me" need completely different
+            # actions, and both otherwise present as the same silence.
+            return None, None
+
     return None, None
+
+
+_VAULT_KEY = []            # memo: [] unasked, [None] asked and failed, [key] got it
+
+
+def _key_from_vault(config=None):
+    """The enrolled key, unwrapped with the stored credential.
+
+    This is what lets a machine hold no key at all: connect once, and the
+    key arrives from the vault for as long as the credential is valid.
+    It is unwrapped here and kept in memory for the life of the process -
+    never written anywhere, which is the whole difference between
+    collecting a key and storing one.
+
+    Returns (key, problem). Both None means simply not configured for it.
+    """
+    if _VAULT_KEY:
+        return _VAULT_KEY[0], None
+
+    raw = config if config is not None else load_config()
+    vault = (raw or {}).get('vault')
+    if not isinstance(vault, dict) or not (vault.get('url') or '').strip():
+        return None, None
+
+    # A placeholder secret: unwrapping the enrolled key uses the API
+    # credential, not the Claudefuscator key - which is the point, since
+    # at this moment we do not have one. The client is used for this one
+    # call and discarded, so nothing can later seal with the placeholder.
+    client, status = VaultClient.from_config(raw, '')
+    if client is None:
+        return None, status
+
+    collected = client.fetch_key()
+    if not collected:
+        _VAULT_KEY.append(None)
+        return None, client.last_error or 'nothing enrolled'
+
+    _VAULT_KEY.append(collected)
+    return collected, None
 
 
 NO_KEY = (
@@ -779,7 +836,7 @@ def prompt_for_key():
 
 def enrol_key(args):
     """Store this machine's key in the vault, wrapped under the API token."""
-    key, source = resolve_key(args.key)
+    key, source = resolve_key(args.key, allow_vault=False)
 
     if not key:
         # Asked for rather than refused. This is the one moment in the
