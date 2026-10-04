@@ -99,10 +99,23 @@ function agentUrl(config) {
    * an empty config into a dead end - including for pairing, which is
    * how a fresh browser gets configured in the first place. */
   if (!raw) {
-    const loopback = allowedOrigins().find((o) => /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(o));
+    /* Any loopback origin EXCEPT the vault's. A vault reached over
+     * loopback - which is how it is exercised in tests, and how someone
+     * would run one locally - would otherwise be mistaken for the agent
+     * and sent /resolve calls it has no route for, without the bearer
+     * token it would want. Defaulting is a convenience; guessing between
+     * two different services is not. */
+    const vaultUrl = typeof (config && config.vault && config.vault.url) === 'string'
+      ? config.vault.url.trim().replace(/\/$/, '')
+      : null;
+
+    const loopback = allowedOrigins().find((o) =>
+      /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(o) && o !== vaultUrl);
+
     return loopback
       ? { url: loopback, defaulted: true }
-      : { reason: 'this extension names no loopback origin to reach an agent on.' };
+      : { reason: 'no "agent" section, and no loopback origin to assume one on. '
+          + 'Add {"agent": {"url": "http://127.0.0.1:8091"}} and press Save.' };
   }
 
   if (typeof raw !== 'object') {
