@@ -7,6 +7,7 @@ a wrong key - because those failures are the claim.
 """
 
 import base64
+import json
 import pathlib
 import sys
 
@@ -141,3 +142,65 @@ def test_a_sealed_row_that_opens_can_still_fail_verification():
     opened = vc.open_envelope(KEY, token, env)
     assert opened == 'attacker.example'          # decrypts fine
     assert not vc.verify_token(KEY, token, opened)   # and is still refused
+
+
+# --- enrolment: the key, wrapped under an API token --------------------
+#
+# This is the one place the key is stored anywhere but an endpoint, so what
+# matters is exactly how much that costs. The wrapping makes a database
+# dump useless; it does not make a live host compromise harmless, and no
+# test here should be read as claiming it does.
+
+ENROL_TOKEN = 'reference-api-token-not-a-real-one'
+ENROL_KEY = 'enrolment-test-key'
+
+
+def test_the_wrapped_key_does_not_contain_the_key():
+    wrapped = vc.wrap_key(ENROL_KEY, ENROL_TOKEN)
+    blob = base64.b64decode(wrapped['ct'])
+    assert ENROL_KEY.encode() not in blob
+    assert ENROL_KEY not in json.dumps(wrapped)
+
+
+def test_the_right_token_unwraps_it():
+    assert vc.unwrap_key(vc.wrap_key(ENROL_KEY, ENROL_TOKEN), ENROL_TOKEN) == ENROL_KEY
+
+
+def test_a_wrong_token_cannot_unwrap_it():
+    wrapped = vc.wrap_key(ENROL_KEY, ENROL_TOKEN)
+    # One character. Anything less strict and a near-miss token would
+    # produce a near-miss key, which derives wrong tokens and silently
+    # unveils nothing.
+    with pytest.raises(vc.VaultCryptoError):
+        vc.unwrap_key(wrapped, ENROL_TOKEN[:-1] + 'X')
+
+
+def test_an_empty_token_is_refused_rather_than_treated_as_a_token():
+    with pytest.raises(vc.VaultCryptoError):
+        vc.unwrap_key(vc.wrap_key(ENROL_KEY, ENROL_TOKEN), '')
+
+
+def test_wrapping_the_same_key_twice_differs():
+    # Fresh nonce each time, so two people enrolling the same key do not
+    # produce the same blob and reveal that they share one.
+    a = vc.wrap_key(ENROL_KEY, ENROL_TOKEN)
+    b = vc.wrap_key(ENROL_KEY, ENROL_TOKEN)
+    assert a['ct'] != b['ct']
+    assert a['n'] != b['n']
+
+
+def test_a_flipped_byte_in_the_wrapping_is_detected():
+    wrapped = vc.wrap_key(ENROL_KEY, ENROL_TOKEN)
+    raw = bytearray(base64.b64decode(wrapped['ct']))
+    raw[0] ^= 0x01
+    wrapped['ct'] = base64.b64encode(bytes(raw)).decode()
+    with pytest.raises(vc.VaultCryptoError):
+        vc.unwrap_key(wrapped, ENROL_TOKEN)
+
+
+def test_the_enrolment_wrapping_is_not_the_value_wrapping():
+    # Different HKDF info, so a blob from one context cannot be replayed
+    # into the other even by someone holding both secrets.
+    wrapped = vc.wrap_key(ENROL_KEY, ENROL_TOKEN)
+    with pytest.raises(vc.VaultCryptoError):
+        vc.open_envelope(ENROL_TOKEN, 'HOST_whatever', wrapped)

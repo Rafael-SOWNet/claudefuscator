@@ -19,6 +19,9 @@
     reveal: document.getElementById('reveal'),
     keyState: document.getElementById('keyState'),
     config: document.getElementById('config'),
+    vaultToken: document.getElementById('vaultToken'),
+    fetchRules: document.getElementById('fetchRules'),
+    rulesState: document.getElementById('rulesState'),
     save: document.getElementById('save'),
     test: document.getElementById('test'),
     clear: document.getElementById('clear'),
@@ -67,8 +70,37 @@
     return cfg;
   }
 
+  /* Collects the key and the shared list in one go, and says what came
+   * back either way: a list that did not arrive and a list that arrived
+   * empty look identical from here, and only one of them is fine. */
+  async function collectFromVault() {
+    el.rulesState.textContent = 'collecting…';
+    await chrome.storage.local.set({ vaultToken: el.vaultToken.value.trim() });
+    try {
+      const reply = await chrome.runtime.sendMessage(
+        { type: 'claudefuscator-rules', force: true });
+
+      if (!reply || reply.reason) {
+        el.rulesState.textContent =
+          'Not collected: ' + ((reply && reply.reason) || 'no answer from the worker');
+        return;
+      }
+
+      const count = ((reply.rules && reply.rules.identifiers) || []).length;
+      el.rulesState.textContent =
+        'Collected version ' + reply.version + ': ' + count + ' identifier'
+        + (count === 1 ? '' : 's') + ', held in memory for this browser session.';
+    } catch (err) {
+      el.rulesState.textContent = 'Not collected: ' + err.message;
+    }
+  }
+
+  el.fetchRules.addEventListener('click', collectFromVault);
+
   async function load() {
-    const stored = await chrome.storage.local.get(['key', 'config', 'highlight']);
+    const stored = await chrome.storage.local.get(
+      ['key', 'config', 'highlight', 'vaultToken']);
+    el.vaultToken.value = stored.vaultToken || '';
     el.highlight.checked = stored.highlight !== false;   // default on
     el.key.value = stored.key || '';
     el.config.value = typeof stored.config === 'string'
@@ -89,9 +121,35 @@
     el.key.type = el.reveal.checked ? 'text' : 'password';
   });
 
+  /* The key to work with: typed here, or collected from the vault.
+   *
+   * Returns '' and says why rather than throwing, because "no key" is the
+   * ordinary state of a fresh install and must read as an instruction, not
+   * an error. */
+  async function workingKey() {
+    const typed = el.key.value.trim();
+    if (typed) return typed;
+
+    if (!el.vaultToken.value.trim()) {
+      say('Enter a key, or a vault token to collect one with.', 'err');
+      return '';
+    }
+
+    // Save the token first: the worker reads it from storage, not from
+    // this field, so collecting before saving would look mysteriously
+    // broken the first time anyone tried it.
+    await chrome.storage.local.set({ vaultToken: el.vaultToken.value.trim() });
+    const held = await chrome.runtime.sendMessage({ type: 'claudefuscator-key' });
+    if (!held || held.reason) {
+      say('No key: ' + ((held && held.reason) || 'no answer from the worker'), 'err');
+      return '';
+    }
+    return held.key;
+  }
+
   el.save.addEventListener('click', async () => {
-    const key = el.key.value.trim();
-    if (!key) return say('Enter a key first.', 'err');
+    const key = await workingKey();
+    if (!key) return;
 
     let cfg;
     try {
@@ -108,14 +166,20 @@
       return say(err.message, 'err');
     }
 
-    await chrome.storage.local.set({ key: key, config: cfg, highlight: el.highlight.checked });
+    /* Only a key that was typed here is stored. One collected from the
+     * vault is deliberately left out: it belongs to this browser session
+     * and writing it to disk would quietly undo the point of enrolment. */
+    const stored = { config: cfg, highlight: el.highlight.checked,
+                     vaultToken: el.vaultToken.value.trim() };
+    if (el.key.value.trim()) stored.key = el.key.value.trim();
+    await chrome.storage.local.set(stored);
     await showKeyState(key);
     say('Saved locally. Open tabs pick this up without a reload.', 'ok');
   });
 
   el.test.addEventListener('click', async () => {
-    const key = el.key.value.trim();
-    if (!key) return say('Enter a key first.', 'err');
+    const key = await workingKey();
+    if (!key) return;
 
     let cfg;
     try {

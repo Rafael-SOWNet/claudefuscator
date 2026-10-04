@@ -98,6 +98,27 @@ vault.MapPut("/identifiers", (PutIdentifiersRequest request, HttpContext http, V
         : Results.Conflict(new { stored = false, reason = "version is not newer than the stored list" });
 });
 
+vault.MapGet("/key", (HttpContext http, VaultStore store, TokenFile tokens) =>
+{
+    var who = Caller(http, tokens);
+    if (who is null) return Results.Unauthorized();
+
+    // Only ever this caller's own. The wrapping means the server cannot
+    // open it, but serving somebody else's would still hand an attacker a
+    // blob to work on offline against a token they might later obtain.
+    var wrapped = store.GetWrappedKey(who);
+    return wrapped is null ? Results.NotFound() : Results.Ok(wrapped);
+});
+
+vault.MapPut("/key", (PutWrappedKeyRequest request, HttpContext http, VaultStore store, TokenFile tokens) =>
+{
+    var who = Caller(http, tokens);
+    if (who is null) return Results.Unauthorized();
+
+    store.PutWrappedKey(who, request);
+    return Results.Ok(new { stored = true });
+});
+
 vault.MapGet("/stats", (HttpContext http, VaultStore store, TokenFile tokens) =>
 {
     var who = Caller(http, tokens);

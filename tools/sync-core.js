@@ -23,6 +23,15 @@ const COPIES = [
     ],
   },
   {
+    /* Opening sealed envelopes. Only the extension gets a copy: the mod's
+     * sandbox has no usable WebCrypto and never decrypts anything, and the
+     * plugin does not talk to the vault. The Python side in
+     * agent/vault_crypto.py is the other implementation of this format,
+     * and shared/vault-vectors.json is what keeps the two honest. */
+    source: path.join(ROOT, 'shared', 'vault-crypto.js'),
+    targets: [path.join(ROOT, 'chrome-extension', 'vault-crypto.js')],
+  },
+  {
     /* The extension does not need this one: it is handed an already-flat
      * config through its options page. */
     source: path.join(ROOT, 'shared', 'config-merge.js'),

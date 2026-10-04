@@ -214,8 +214,25 @@ do not reopen them without reason:
 
 - It lives **inside `ai.example.com`**, reusing `invited_users`, group roles
   and the existing `products` for need-to-know. Not a second service.
-- **The host never holds the key.** If a change appears to need one, stop
-  and redesign.
+- **The host holds the key only in one specific, wrapped form** — and this
+  was not the original rule. It used to read "the host never holds the key,
+  if a change appears to need one, stop and redesign", and that held until
+  the browser had to stop asking people to retype it. What the host stores
+  now is `AES-GCM(HKDF(that person's API token), key)`, written by the agent
+  under `--enrol-key` and opened only in a browser.
+  - **What survives.** The host keeps only `SHA-256` of each API token, so a
+    database dump, a backup or a stolen disk yields a blob nothing on the
+    host can open. The row is per owner and served only to its owner.
+  - **What does not.** An API token arrives in plaintext on every request,
+    so code execution on the *running* host can harvest one and unwrap. No
+    arrangement avoids that once a server distributes keys at all.
+  - Everything else on this list still holds: the host cannot read a value
+    row, cannot read the identifier list, and gains nothing from the
+    wrapped key alone. Do not let "the server has the key now" spread into
+    a belief that it can read the vault.
+  - If you are tempted to make the host do anything *with* that blob beyond
+    storing and returning it, stop and redesign - that is the line this
+    replaced, and it still applies.
 - **Values are encrypted client-side**; the host stores ciphertext. The
   vault is a distilled index of exactly which strings are sensitive across
   every project, which makes it a better target than any single repository.
@@ -232,10 +249,13 @@ Settled since that list was written:
   covers both). The sealed artefact is the owner's to make; nothing in code
   depends on it, but no row should be written to a real vault before it
   exists.
-- **Which client writes**: the agent, and only the agent. The mod and the
-  extension reach loopback and nothing else.
-- **The extension talks to the agent**, not to the host. It never needed a
-  public origin.
+- **Which client writes**: the agent, and only the agent. The mod reaches
+  loopback and nothing else; the extension reads from the server but never
+  writes to it.
+- **The extension talks to the agent for values, and to the host for the
+  key and the shared list.** It did not need a public origin until central
+  governance of the identifier list did; now it has exactly one, named in
+  the manifest. Resolving a value still goes to loopback.
 - **No Entra app registration is required.** The agent carries a personal
   API token created in the `ai.example.com` UI, which the existing
   `ApiTokenAuthenticationHandler` resolves through the same `invited_users`
@@ -326,24 +346,37 @@ org/product/process vocabulary) -> **identifiers** (project list) ->
 - **Never log or commit a wire log.** `CLAUDEFUSCATOR_WIRE_LOG` output is
   post-scrub but is still a full copy of a conversation. Gitignored; delete it
   after a verification run.
-- **The extension reaches exactly one host: the loopback agent.** This
-  replaced a flat "zero network calls" rule when the agent client landed —
-  resolving values the extension cannot derive means asking something. The
-  rule now has edges, and all of them are load-bearing:
+- **The extension reaches two hosts and no others: the loopback agent, and
+  the Claudefuscator server.** This rule has now been narrowed twice from a
+  flat "zero network calls" — first for the agent, because resolving values
+  the extension cannot derive means asking something, then for the server,
+  because collecting the key and the shared list does too. Each widening
+  bought something specific; the edges below are what keep it from becoming
+  "the extension may call out". All of them are load-bearing:
   - The **only** `fetch` is in `background.js`. No `XMLHttpRequest`,
     `WebSocket`, `sendBeacon`, `navigator.connect`, remote script or remote
     font, anywhere. The content script makes no network call at all.
-  - `permissions` stays `["storage"]`. `host_permissions` holds loopback
-    origins and nothing else, and `background.js` derives what it may
-    contact *from the manifest* rather than restating it, so the two cannot
-    drift. Widening where real values may be sent has to be a manifest
-    change, not a config line.
+  - `permissions` stays `["storage"]`. `host_permissions` holds the
+    loopback origins and the one server origin, and `background.js` derives
+    what it may contact *from the manifest* rather than restating it, so the
+    two cannot drift. Widening where real values may be sent has to be a
+    manifest change, not a config line - and in particular the shared list
+    the server hands out cannot redirect anything: `content.js` keeps the
+    local `agent` and `vault` settings when it merges, so a compromised
+    server can change what is hidden but not where anything is sent.
   - **Every value the agent returns is verified before it is displayed**:
     re-derive the token from the value under our own key, accept only on an
     exact match. The agent is a source, not an authority. The e2e test
     serves a deliberately poisoned mapping to hold this.
   - Use `chrome.storage.local`, never `chrome.storage.sync`, which would
     upload the key and the real values to a Google account.
+  - **A collected key goes in `chrome.storage.session` and nowhere else.**
+    That area is memory-only, invisible to content scripts, and gone when
+    the browser closes, which is the whole difference between "fetched for
+    this session" and "stored". A key *typed* into the options page still
+    goes in `chrome.storage.local`, because without a server there is
+    nowhere else for it to come from; one that was collected must never be
+    written back there. The e2e asserts both halves.
 - **The content script must never write into an editable region.** Restoring a
   token inside the claude.ai composer would put the real value into the box the
   user is about to send. The skip list in `content.js` is a safety control, not

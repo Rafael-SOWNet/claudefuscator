@@ -200,6 +200,70 @@ def open_document(secret, envelope, label=DOCUMENT_LABEL):
         raise VaultCryptoError('the document did not decode as text') from None
 
 
+ENROLMENT_LABEL = 'claudefuscator/enrolment/v1'
+
+
+def _wrapping_key(api_token):
+    """A key derived from the caller's API token.
+
+    Separate derivation from value_key, and from a different input: this
+    one wraps the Claudefuscator key for transport and storage, and must
+    not be reachable from anything the server keeps. The server stores
+    only SHA-256 of the API token, so it cannot run this.
+    """
+    if not api_token:
+        raise VaultCryptoError('no API token')
+    return HKDF(
+        algorithm=hashes.SHA256(), length=KEY_BYTES, salt=None,
+        info=ENROLMENT_LABEL.encode('utf-8'),
+    ).derive(api_token.encode('utf-8'))
+
+
+def wrap_key(secret, api_token):
+    """The Claudefuscator key, sealed so only this API token opens it.
+
+    What the server stores is therefore useless on its own: a database
+    dump, a backup or a stolen disk yields a blob, because the token that
+    unwraps it is never at rest there - only its hash is.
+
+    It does NOT survive the running server being compromised. A token
+    crosses the wire on every request, so code execution on the host can
+    harvest one and unwrap. That is inherent to a server distributing the
+    key at all, and is why the design said for a long time that it should
+    not.
+    """
+    if not isinstance(secret, str) or not secret:
+        raise VaultCryptoError('no key to wrap')
+    nonce = os.urandom(NONCE_BYTES)
+    ct = AESGCM(_wrapping_key(api_token)).encrypt(
+        nonce, secret.encode('utf-8'), ENROLMENT_LABEL.encode('utf-8'))
+    return {
+        'v': ENVELOPE_VERSION,
+        'n': base64.b64encode(nonce).decode('ascii'),
+        'ct': base64.b64encode(ct).decode('ascii'),
+    }
+
+
+def unwrap_key(envelope, api_token):
+    """The key back, or VaultCryptoError. A different token does not open it."""
+    if not isinstance(envelope, dict):
+        raise VaultCryptoError('not an envelope')
+    if envelope.get('v') != ENVELOPE_VERSION:
+        raise VaultCryptoError(f'unsupported envelope version {envelope.get("v")!r}')
+    try:
+        nonce = base64.b64decode(envelope['n'], validate=True)
+        ct = base64.b64decode(envelope['ct'], validate=True)
+    except (KeyError, ValueError, TypeError) as e:
+        raise VaultCryptoError(f'malformed envelope: {e}') from None
+    try:
+        plain = AESGCM(_wrapping_key(api_token)).decrypt(
+            nonce, ct, ENROLMENT_LABEL.encode('utf-8'))
+    except InvalidTag:
+        raise VaultCryptoError('the wrapped key does not open under this API '
+                               'token - enrol again after rotating it') from None
+    return plain.decode('utf-8')
+
+
 def verify_token(secret, token, value, token_length=None):
     """Does this value actually hash back to this token?
 

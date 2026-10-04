@@ -371,6 +371,51 @@ def print_fingerprint():
     return 0
 
 
+def enrol_key(args):
+    """Store this machine's key in the vault, wrapped under the API token."""
+    key = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    if not key:
+        print('No CLAUDEFUSCATOR_KEY set; nothing to enrol.', file=sys.stderr)
+        return 2
+
+    raw = None
+    for candidate in (args.config, os.environ.get('CLAUDEFUSCATOR_CONFIG'),
+                      os.path.join(os.getcwd(), 'claudefuscator.local.json'),
+                      os.path.expanduser('~/.claudefuscator/identifiers.json')):
+        if candidate and os.path.exists(candidate):
+            try:
+                with open(candidate, 'rb') as f:
+                    raw = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            break
+
+    client, status = VaultClient.from_config(raw or {}, key)
+    if client is None:
+        print(f'No vault to enrol with: {status}', file=sys.stderr)
+        return 2
+
+    ok, err = client.enrol_key()
+    if not ok:
+        print(f'Not enrolled: {err}', file=sys.stderr)
+        return 1
+
+    # Verified by reading it back, because an enrolment that silently
+    # stored the wrong thing would only surface in a browser that cannot
+    # unveil anything, with nothing to point at.
+    if client.fetch_key() != key:
+        print('Enrolled, but it did not read back as the same key. Do not rely '
+              'on it.', file=sys.stderr)
+        return 1
+
+    print('Enrolled, and verified by reading it back.')
+    print('Any browser with this same API token can now collect the key for '
+          'its session. The vault holds it wrapped under that token and '
+          'cannot open it from the database alone - but a compromise of the '
+          'running host can. See docs/UNVEIL-SERVER.md.')
+    return 0
+
+
 def publish_identifiers(args):
     """Seal a local file and publish it as the shared identifier list.
 
@@ -439,6 +484,11 @@ def main():
     parser.add_argument('--port', type=int, default=int(os.environ.get('CLAUDEFUSCATOR_AGENT_PORT', DEFAULT_PORT)))
     parser.add_argument('--config', help='identifier list; defaults to CLAUDEFUSCATOR_CONFIG')
     parser.add_argument(
+        '--enrol-key', action='store_true',
+        help="wrap this machine's key under your API token and store it in "
+             'the vault, so a browser can collect it once per session. Read '
+             'the trade-off in docs/UNVEIL-SERVER.md before using it.')
+    parser.add_argument(
         '--fingerprint', action='store_true',
         help='print a short fingerprint of the configured key and exit. Reveals '
              'nothing about the key; two copies match if and only if their '
@@ -459,6 +509,9 @@ def main():
 
     if args.fingerprint:
         return print_fingerprint()
+
+    if args.enrol_key:
+        return enrol_key(args)
 
     if args.publish_identifiers:
         return publish_identifiers(args)

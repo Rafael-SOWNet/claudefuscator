@@ -82,6 +82,17 @@ internal sealed class VaultStore
             -- the key, so keeping every revision would quietly build the
             -- very archive the version binding exists to stop being
             -- replayed.
+            -- Per user, because the wrapping is per API token. Keyed on the
+            -- caller's name rather than the token, so rotating a token
+            -- replaces the row instead of orphaning it.
+            CREATE TABLE IF NOT EXISTS vault_keys (
+                owner            TEXT    PRIMARY KEY,
+                envelope_version INTEGER NOT NULL,
+                nonce            TEXT    NOT NULL,
+                ciphertext       TEXT    NOT NULL,
+                updated_at       TEXT    NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS vault_identifiers (
                 id               INTEGER PRIMARY KEY CHECK (id = 1),
                 envelope_version INTEGER NOT NULL,
@@ -274,6 +285,48 @@ internal sealed class VaultStore
         command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("o"));
         command.ExecuteNonQuery();
         return true;
+    }
+
+    /// <summary>This caller's wrapped key, or null if they have not enrolled.</summary>
+    public WrappedKeyDto? GetWrappedKey(Identity who)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT envelope_version, nonce, ciphertext FROM vault_keys WHERE owner = $owner";
+        command.Parameters.AddWithValue("$owner", who.Name);
+
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            ? new WrappedKeyDto(reader.GetInt32(0), reader.GetString(1), reader.GetString(2))
+            : null;
+    }
+
+    /// <summary>
+    /// Store this caller's wrapped key, replacing any previous one.
+    /// </summary>
+    /// <remarks>
+    /// Scoped to the caller, with no route to anyone else's: one person
+    /// enrolling must not be able to overwrite another's key, which would
+    /// lock them out of every row they had written.
+    /// </remarks>
+    public void PutWrappedKey(Identity who, PutWrappedKeyRequest wrapped)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO vault_keys (owner, envelope_version, nonce, ciphertext, updated_at)
+            VALUES ($owner, $envelope, $nonce, $ct, $at)
+            ON CONFLICT(owner) DO UPDATE SET
+                envelope_version = $envelope, nonce = $nonce,
+                ciphertext = $ct, updated_at = $at
+            """;
+        command.Parameters.AddWithValue("$owner", who.Name);
+        command.Parameters.AddWithValue("$envelope", wrapped.EnvelopeVersion);
+        command.Parameters.AddWithValue("$nonce", wrapped.Nonce);
+        command.Parameters.AddWithValue("$ct", wrapped.Ciphertext);
+        command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("o"));
+        command.ExecuteNonQuery();
     }
 
     /// <summary>How much is here, counting only what this caller may read.</summary>

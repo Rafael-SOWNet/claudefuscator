@@ -399,9 +399,13 @@ and sometimes pasted.
 
 Four properties, all tested:
 
-- **The server never holds the key.** Values are sealed on this machine
-  before they leave it; the server stores a token, a nonce and ciphertext,
-  and nothing in its schema or API takes a key.
+- **The server cannot read what it stores.** Values are sealed on this
+  machine before they leave it; the server stores a token, a nonce and
+  ciphertext. The one key-shaped thing it holds is the optional enrolment
+  blob — your key wrapped under your own API token, of which the server
+  keeps only a hash — so a database dump yields something it cannot open.
+  A compromise of the *running* server can harvest a token and unwrap it;
+  see `docs/UNVEIL-SERVER.md` before deciding to enrol.
 - **The server is not trusted to be right.** Every row that comes back is
   opened under your key *and* then checked by re-deriving its token. A row
   that decrypts cleanly but does not hash back is refused — a writer holding

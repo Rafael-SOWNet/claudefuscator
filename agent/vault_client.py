@@ -207,6 +207,52 @@ class VaultClient:
 
         return out
 
+    # ---- key enrolment ---------------------------------------------------
+
+    def enrol_key(self):
+        """Wrap this machine's key under our API token and store it.
+
+        Done once per person rather than once per browser: afterwards any
+        browser holding the same token collects the key for its session
+        without anybody retyping it.
+        """
+        if not self.secret:
+            return False, 'no key'
+        try:
+            wrapped = vc.wrap_key(self.secret, self._token)
+        except vc.VaultCryptoError as e:
+            return False, str(e)
+
+        self.last_error = None
+        reply = self._request('PUT', '/api/vault/key', {
+            'envelopeVersion': wrapped['v'],
+            'nonce': wrapped['n'],
+            'ciphertext': wrapped['ct'],
+        })
+        if reply is None:
+            return False, self.last_error or 'the vault refused it'
+        return True, None
+
+    def fetch_key(self):
+        """The enrolled key, unwrapped, or None.
+
+        Used to check enrolment worked. The agent does not need this - it
+        already has the key - but being unable to verify an enrolment from
+        the same tool that performed it would make the whole arrangement
+        unfalsifiable.
+        """
+        self.last_error = None
+        reply = self._get('/api/vault/key')
+        if not reply:
+            return None
+        try:
+            return vc.unwrap_key({'v': reply.get('envelopeVersion'),
+                                  'n': reply.get('nonce'),
+                                  'ct': reply.get('ciphertext')}, self._token)
+        except vc.VaultCryptoError as e:
+            self.last_error = str(e)
+            return None
+
     # ---- the shared identifier list ------------------------------------
 
     def fetch_identifiers(self):

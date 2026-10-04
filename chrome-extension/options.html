@@ -30,6 +30,26 @@
         <input type="checkbox" id="reveal"> Show key
       </label>
       <p class="help" id="keyState" aria-live="polite"></p>
+
+      <h2>Or collect it from the vault</h2>
+      <p class="help">
+        With a Claudefuscator server you do not type the key here at all.
+        Enrol it once from the agent (<code>--enrol-key</code>) and this
+        browser collects it on first use, holding it in memory until the
+        browser closes. Leave <strong>Shared key</strong> empty to work that
+        way; fill it in to work from this machine alone.
+      </p>
+      <label class="field">
+        <span>Vault API token</span>
+        <input type="password" id="vaultToken" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="help">
+        A personal token from the Claudefuscator server. It is what unwraps
+        the enrolled key, so treat it as the key: this profile only, never a
+        chat, a commit or a shared file.
+      </p>
+      <button type="button" id="fetchRules">Collect key and shared list now</button>
+      <p class="help" id="rulesState" aria-live="polite"></p>
     </section>
 
     <section>

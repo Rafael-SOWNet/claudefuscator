@@ -196,3 +196,32 @@ internal sealed class TokenFile
     private static string Hash(string token)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 }
+
+/// <summary>
+/// The Claudefuscator key, wrapped so that only its owner's API token
+/// opens it, stored per user so a browser can collect it once a session
+/// instead of a person retyping it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// This is the one place the design knowingly gives something up. For most
+/// of its life the rule was that this server never holds the key in any
+/// form, because that is what makes a compromise yield ciphertext rather
+/// than the deanonymisation mapping for every conversation anyone has had.
+/// </para>
+/// <para>
+/// What survives: the blob is sealed under a key derived from the user's
+/// API token, and this server stores only a SHA-256 of that token. A
+/// database dump, a backup or a stolen disk therefore yields something
+/// nothing on the host can open.
+/// </para>
+/// <para>
+/// What does not: a token arrives in plaintext on every request, so code
+/// execution on the running host can harvest one and unwrap. No
+/// arrangement avoids that once a server hands out keys at all. Weigh it
+/// knowing that, rather than reading the wrapping as making it safe.
+/// </para>
+/// </remarks>
+public sealed record WrappedKeyDto(int EnvelopeVersion, string Nonce, string Ciphertext);
+
+public sealed record PutWrappedKeyRequest(int EnvelopeVersion, string Nonce, string Ciphertext);
