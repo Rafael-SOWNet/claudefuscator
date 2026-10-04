@@ -93,10 +93,20 @@ function allowedOrigins() {
 function agentUrl(config) {
   const raw = config && config.agent;
 
-  if (!raw || typeof raw !== 'object') {
-    return { reason: 'your identifier list has no "agent" section, so values '
-      + 'this extension cannot derive stay as tokens. Add '
-      + '{"agent": {"url": "http://127.0.0.1:8091"}} and press Save.' };
+  /* No agent section? Use the loopback origin the manifest already
+   * names. There is exactly one sensible value, the manifest is what
+   * bounds it either way, and making people write it out by hand turned
+   * an empty config into a dead end - including for pairing, which is
+   * how a fresh browser gets configured in the first place. */
+  if (!raw) {
+    const loopback = allowedOrigins().find((o) => /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(o));
+    return loopback
+      ? { url: loopback, defaulted: true }
+      : { reason: 'this extension names no loopback origin to reach an agent on.' };
+  }
+
+  if (typeof raw !== 'object') {
+    return { reason: '"agent" in your identifier list is not an object.' };
   }
   if (raw.enabled === false) {
     return { reason: 'the agent is turned off in your config ("enabled": false).' };
@@ -128,6 +138,65 @@ async function authHeader(secret) {
 /* The key this session works with, collected from the vault if it is not
  * already to hand. Returns { key } or { reason }; never throws, because
  * every caller has to be able to say WHY it is not scrubbing. */
+/* Take the key and the list from the local agent, during a window it
+ * opened. The person runs `--pair` at the terminal and presses the
+ * button here; nothing is typed into the browser.
+ *
+ * This exists because the vault's copy of the key is wrapped under the
+ * credential that enrolled it, which belongs to the agent. No second
+ * credential can open it, so handing browsers their own token could
+ * never have worked - the AEAD simply fails. Over loopback the agent
+ * already holds the key, and the person at the terminal is the person
+ * at the browser.
+ */
+async function pairWithAgent() {
+  const { config } = await chrome.storage.local.get(['config']);
+
+  const where = agentUrl(config);
+  if (where.reason) return { reason: where.reason };
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(where.url + '/pair', {
+      method: 'POST',
+      signal: abort.signal,
+      credentials: 'omit',
+      cache: 'no-store',
+    });
+
+    if (res.status === 403) {
+      return { reason: 'no pairing window is open. Run this first:\n'
+        + '    python agent/claudefuscator_agent.py --pair' };
+    }
+    if (!res.ok) return { reason: 'the agent answered ' + res.status };
+
+    const body = await res.json();
+    if (!body || !body.key) return { reason: 'the agent sent no key' };
+
+    /* The key goes to session storage and nowhere else - memory only,
+     * gone when the browser closes. The LIST may be written to disk: it
+     * is configuration, not a secret in the same sense, and a browser
+     * that forgot it on every restart would scrub nothing until the
+     * next pairing. */
+    await chrome.storage.session.set({ [KEY_CACHE]: body.key });
+    const toStore = { collectedAt: Date.now() };
+    if (body.config) toStore.config = body.config;
+    await chrome.storage.local.set(toStore);
+
+    const count = ((body.config && body.config.identifiers) || []).length;
+    return { paired: true, identifiers: count, defaulted: where.defaulted };
+  } catch (err) {
+    return {
+      reason: err && err.name === 'AbortError'
+        ? 'the agent did not answer in time'
+        : 'could not reach the agent: ' + (err && err.message),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let collecting = null;
 
 async function ensureKey() {
@@ -356,6 +425,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'claudefuscator-resolve') {
     resolve(msg.tokens).then(sendResponse);
     return true;   // keep the channel open for the async reply
+  }
+
+  if (msg.type === 'claudefuscator-pair') {
+    pairWithAgent().then(sendResponse);
+    return true;
   }
 
   if (msg.type === 'claudefuscator-key') {

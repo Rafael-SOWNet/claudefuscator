@@ -21,6 +21,8 @@
     config: document.getElementById('config'),
     vaultToken: document.getElementById('vaultToken'),
     fetchRules: document.getElementById('fetchRules'),
+    pair: document.getElementById('pair'),
+    pairState: document.getElementById('pairState'),
     rulesState: document.getElementById('rulesState'),
     save: document.getElementById('save'),
     test: document.getElementById('test'),
@@ -120,6 +122,30 @@
     }
   }
 
+  /* Pairing needs nothing from this page - not a key, not a token, not
+   * even an agent url, since that defaults to the loopback origin the
+   * manifest names. That is the point: a fresh browser can be set up
+   * without anybody typing anything into it. */
+  async function pairWithAgent() {
+    el.pairState.textContent = 'pairing…';
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: 'claudefuscator-pair' });
+      if (!reply || reply.reason) {
+        el.pairState.textContent =
+          'Not paired: ' + ((reply && reply.reason) || 'no answer from the worker');
+        return;
+      }
+      el.pairState.textContent =
+        'Paired. The key is held for this browser session, with '
+        + reply.identifiers + ' identifier' + (reply.identifiers === 1 ? '' : 's')
+        + ' from the agent.';
+      await showKeyState(null);
+    } catch (err) {
+      el.pairState.textContent = 'Not paired: ' + err.message;
+    }
+  }
+
+  el.pair.addEventListener('click', pairWithAgent);
   el.fetchRules.addEventListener('click', collectFromVault);
 
   async function load() {

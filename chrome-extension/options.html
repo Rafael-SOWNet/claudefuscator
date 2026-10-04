@@ -31,6 +31,17 @@
       </label>
       <p class="help" id="keyState" aria-live="polite"></p>
 
+      <h2>Pair with the local agent</h2>
+      <p class="help">
+        The simplest way, and the only one that needs nothing typed here.
+        At a terminal run
+        <code>python agent/claudefuscator_agent.py --pair</code>, then press
+        the button below within a minute. The key comes straight from the
+        agent over loopback and is held in memory until this browser closes.
+      </p>
+      <button type="button" id="pair">Pair with local agent</button>
+      <p class="help" id="pairState" aria-live="polite"></p>
+
       <h2>Or collect it from the vault</h2>
       <p class="help">
         With a Claudefuscator server you do not type the key here at all.

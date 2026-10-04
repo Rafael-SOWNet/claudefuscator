@@ -46,6 +46,7 @@ import socket
 import stat
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -222,6 +223,12 @@ class Handler(BaseHTTPRequestHandler):
     bootstrap_key = None
     bootstrap_config = None
 
+    # When the pairing window closes, as a monotonic deadline. None means
+    # shut. Opened only by someone who can read the handshake file, and
+    # spent by the first client through it.
+    pair_until = None
+    pair_claimed = False
+
     def log_message(self, fmt, *args):
         # One line per request, without the resolved tokens.
         sys.stderr.write('%s - %s\n' % (self.address_string(), fmt % args))
@@ -283,6 +290,22 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if self.path == '/pair/state':
+            # For the --pair command to report an outcome rather than
+            # leaving somebody guessing whether the browser took it.
+            presented = self.headers.get(BOOTSTRAP_HEADER) or ''
+            if not Handler.bootstrap_token or not hmac.compare_digest(
+                    presented, Handler.bootstrap_token):
+                self._json(403, {'error': 'bad or missing ' + BOOTSTRAP_HEADER})
+                return
+            open_for = (Handler.pair_until - time.monotonic()
+                        if Handler.pair_until else 0)
+            self._json(200, {
+                'claimed': Handler.pair_claimed,
+                'secondsLeft': max(0, round(open_for)),
+            })
+            return
+
         if self.path == '/bootstrap':
             # Hands the mod the key and the identifier list, so a machine
             # can run with neither configured locally.
@@ -312,7 +335,63 @@ class Handler(BaseHTTPRequestHandler):
 
         self._json(404, {'error': 'not found'})
 
+    def _pair_open(self):
+        """Open the pairing window. Needs the handshake token."""
+        presented = self.headers.get(BOOTSTRAP_HEADER) or ''
+        if not Handler.bootstrap_token or not hmac.compare_digest(
+                presented, Handler.bootstrap_token):
+            self._json(403, {'error': 'bad or missing ' + BOOTSTRAP_HEADER})
+            return
+
+        Handler.pair_until = time.monotonic() + PAIR_WINDOW_SECONDS
+        Handler.pair_claimed = False
+        self._json(200, {'open': True, 'seconds': PAIR_WINDOW_SECONDS})
+
+    def _pair_claim(self):
+        """Hand the key and the list to whoever asks, during the window.
+
+        UNAUTHENTICATED, deliberately, and this is the one route that is.
+        The client asking is a browser extension: it cannot read the
+        handshake file, and it has no credential of its own until this
+        call gives it one. Something has to go first.
+
+        What makes it safe is not a secret but a shape:
+
+          - the window only opens when somebody at the terminal says so,
+            and that person had to be able to read the handshake file,
+          - it lasts seconds, not for ever,
+          - the first claim spends it,
+          - and the agent sends NO CORS headers, so a web page can make
+            this request but cannot read the answer. That last one is
+            load-bearing. Adding Access-Control-Allow-Origin here would
+            turn a deliberate, time-boxed handover into any page on the
+            internet being able to take the key during the window.
+        """
+        now = time.monotonic()
+        if Handler.pair_until is None or now > Handler.pair_until:
+            self._json(403, {'error': 'no pairing window is open'})
+            return
+
+        # Spent on first use. Two clients pairing from one window would
+        # mean the second one nobody asked for.
+        Handler.pair_until = None
+        Handler.pair_claimed = True
+
+        self._json(200, {
+            'key': Handler.bootstrap_key,
+            'config': Handler.bootstrap_config,
+            'tokenVersion': core.TOKEN_VERSION,
+        })
+
     def do_POST(self):
+        if self.path == '/pair/open':
+            self._pair_open()
+            return
+
+        if self.path == '/pair':
+            self._pair_claim()
+            return
+
         if self.path not in ('/resolve', '/mappings'):
             self._json(404, {'error': 'not found'})
             return
@@ -568,6 +647,10 @@ def load_config(explicit=None):
 HANDSHAKE_PATH = os.path.join(
     os.path.expanduser('~'), '.claudefuscator', 'agent.json')
 BOOTSTRAP_HEADER = 'x-claudefuscator-bootstrap'
+
+# Long enough to switch to the browser and click; short enough
+# that a window left open by mistake is not a standing offer.
+PAIR_WINDOW_SECONDS = 60
 
 
 def write_handshake(port):
@@ -859,6 +942,80 @@ def print_status(args):
     return 0 if key and config_path else 1
 
 
+def pair(_args):
+    """Open a pairing window on the running agent, and report the outcome.
+
+    The browser gets the key this way rather than from the vault,
+    because the vault's copy is wrapped under the credential that
+    enrolled it - which belongs to the agent, not to any browser. Only
+    the enrolling client can open that blob, so handing browsers a
+    different token could never have worked.
+
+    Over loopback the agent already has the key in memory, and the
+    person running this command is the same person sitting at the
+    browser. That is the whole trust argument, and it is a better one
+    than a second credential nobody wanted to manage.
+    """
+    try:
+        with open(HANDSHAKE_PATH, encoding='utf-8') as f:
+            handshake = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        print('No running agent found. Start it first:\n'
+              '  python agent/claudefuscator_agent.py', file=sys.stderr)
+        return 2
+
+    base = f"http://127.0.0.1:{handshake['port']}"
+
+    def ask(path, method='GET'):
+        request = urllib.request.Request(base + path, method=method,
+                                         data=b'' if method == 'POST' else None)
+        request.add_header(BOOTSTRAP_HEADER, handshake['token'])
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode('utf-8'))
+
+    try:
+        opened = ask('/pair/open', 'POST')
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # A running agent that has never heard of pairing. Saying "not
+            # answering" sent me looking at the handshake file when the
+            # answer was that the process was started from older code.
+            print('The agent that is running does not support pairing - it '
+                  'predates it. Restart it and try again.', file=sys.stderr)
+        else:
+            print(f'The agent refused to open a window ({e.code}).', file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, OSError, ValueError):
+        print('No agent answered on that port. The handshake file may name a '
+              'process that has since stopped; start the agent again.',
+              file=sys.stderr)
+        return 1
+
+    seconds = opened.get('seconds', PAIR_WINDOW_SECONDS)
+    print(f'Pairing is open for {seconds} seconds.')
+    print()
+    print('  In the extension options, press "Pair with local agent".')
+    print()
+    print('Nothing is typed or pasted: the key goes straight from this agent')
+    print('to the extension over loopback, and is held in that browser only')
+    print('until it closes.')
+
+    deadline = time.monotonic() + seconds + 2
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        try:
+            state = ask('/pair/state')
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            continue
+        if state.get('claimed'):
+            print('\nPaired. The extension has the key for this browser session.')
+            return 0
+
+    print('\nNobody paired in time; the window is shut and nothing was handed '
+          'over. Run this again when the browser is ready.', file=sys.stderr)
+    return 1
+
+
 def disconnect(_args):
     """Forget the stored credential."""
     if credentials.clear():
@@ -1065,6 +1222,10 @@ def main():
         help='get a vault credential by approving this agent in your browser, '
              'instead of creating one by hand and pasting it')
     parser.add_argument(
+        '--pair', action='store_true',
+        help='hand the key to a browser extension over loopback, during a '
+             'short window you open from here. Nothing is typed or pasted.')
+    parser.add_argument(
         '--disconnect', action='store_true',
         help='forget the stored vault credential on this machine')
     parser.add_argument(
@@ -1102,6 +1263,9 @@ def main():
 
     if args.connect:
         return connect(args)
+
+    if args.pair:
+        return pair(args)
 
     if args.disconnect:
         return disconnect(args)
