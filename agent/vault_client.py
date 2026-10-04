@@ -81,6 +81,10 @@ class VaultClient:
         self.product = product
         self.timeout = timeout
         self.last_error = None
+        # The HTTP status behind the last failure, where there was one.
+        # Callers need to tell "nothing there yet" from "refused" without
+        # parsing an English sentence.
+        self.last_status = None
 
     # ---- configuration -------------------------------------------------
 
@@ -159,6 +163,7 @@ class VaultClient:
                 return None
             # Status only. The body of an error from an authenticated
             # endpoint can echo the request, and the request carries tokens.
+            self.last_status = e.code
             self.last_error = f'vault answered {e.code}'
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
             self.last_error = f'vault unreachable: {type(e).__name__}'

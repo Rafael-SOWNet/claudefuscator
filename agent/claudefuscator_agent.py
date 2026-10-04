@@ -453,6 +453,16 @@ def load_config(explicit=None):
         return {}
 
 
+def fingerprint(key):
+    """Eight characters that identify a key without disclosing it.
+
+    One derivation, used everywhere a key is named, so two places cannot
+    print different fingerprints for the same key and make people think
+    they hold different ones.
+    """
+    return core.hmac_hex(key, FINGERPRINT_LABEL)[:8]
+
+
 def print_fingerprint():
     """Say which key is configured, without saying what it is.
 
@@ -475,8 +485,7 @@ def print_fingerprint():
         print(NO_KEY, file=sys.stderr)
         return 2
 
-    print(f'key fingerprint: {core.hmac_hex(key, FINGERPRINT_LABEL)[:8]}  '
-          f'({core.TOKEN_VERSION})')
+    print(f'key fingerprint: {fingerprint(key)}  ({core.TOKEN_VERSION})')
     print('Same key on another machine prints the same eight characters. '
           'Different key, different fingerprint - compare these rather than '
           'the keys themselves.')
@@ -625,6 +634,75 @@ def connect(args):
     return 0
 
 
+def print_status(args):
+    """What this machine is configured with, without revealing any of it.
+
+    Exists because every failure in this tool looks the same from the
+    outside: nothing happens. "Is it scrubbing?", "did the connect work?"
+    and "is my key the same one my colleague has?" are the three questions
+    people actually ask, and before this they had no way to ask them.
+
+    Prints sources and fingerprints only. Never a key, never a credential.
+    """
+    key, source = resolve_key()
+    config_path = resolve_config_path(args.config)
+
+    print('Key          : ', end='')
+    if key:
+        print(f'from {source}, fingerprint {fingerprint(key)}')
+    else:
+        print('NOT CONFIGURED - nothing will be scrubbed')
+
+    print(f'Identifiers  : {config_path or "NOT FOUND - nothing will be scrubbed"}')
+
+    raw = load_config(args.config)
+    vault = (raw or {}).get('vault')
+    url = (vault or {}).get('url', '').strip().rstrip('/') if isinstance(vault, dict) else ''
+
+    if not url:
+        print('Vault        : not configured (local mode)')
+        return 0 if key else 1
+
+    print(f'Vault        : {url}')
+
+    client, vault_status = VaultClient.from_config(raw, key or 'unused')
+    if client is None:
+        print(f'Credential   : {vault_status}')
+        return 1
+
+    print(f'Credential   : stored ({credentials.protection()})')
+
+    enrolled = client.fetch_key()
+    if enrolled is None:
+        # 404 is the ordinary state before anyone enrols, not a fault.
+        # Printing the status code here sent the reader looking for a
+        # server problem that was not there.
+        reason = ('nothing enrolled yet - run with --enrol-key'
+                  if client.last_status == 404
+                  else client.last_error or 'could not be read')
+        print(f'Enrolled key : {reason}')
+    elif not key:
+        print(f'Enrolled key : present, fingerprint {fingerprint(enrolled)}')
+    elif enrolled == key:
+        print(f'Enrolled key : matches this machine ({fingerprint(enrolled)})')
+    else:
+        # The quiet disaster. Both keys work, both scrub, and neither side
+        # can resolve the other's tokens - which looks like the vault
+        # losing data rather than two keys being in play.
+        print(f'Enrolled key : DIFFERENT from this machine '
+              f'(enrolled {fingerprint(enrolled)}, '
+              f'local {fingerprint(key)})')
+        print('               Tokens made here will not resolve for anyone '
+              'using the enrolled one.')
+        return 1
+
+    # Non-zero whenever this machine would not actually scrub. The whole
+    # point of a status command in this project is that silence and
+    # success look identical, so exiting 0 while reporting "nothing will
+    # be scrubbed" would reproduce the failure it exists to expose.
+    return 0 if key and config_path else 1
+
+
 def disconnect(_args):
     """Forget the stored credential."""
     if credentials.clear():
@@ -741,6 +819,10 @@ def main():
     parser.add_argument('--port', type=int, default=int(os.environ.get('CLAUDEFUSCATOR_AGENT_PORT', DEFAULT_PORT)))
     parser.add_argument('--config', help='identifier list; defaults to CLAUDEFUSCATOR_CONFIG')
     parser.add_argument(
+        '--status', action='store_true',
+        help='what this machine is configured with, and whether the enrolled '
+             'key matches it. Prints sources and fingerprints, never secrets.')
+    parser.add_argument(
         '--connect', action='store_true',
         help='get a vault credential by approving this agent in your browser, '
              'instead of creating one by hand and pasting it')
@@ -776,6 +858,9 @@ def main():
 
     if args.fingerprint:
         return print_fingerprint()
+
+    if args.status:
+        return print_status(args)
 
     if args.connect:
         return connect(args)
