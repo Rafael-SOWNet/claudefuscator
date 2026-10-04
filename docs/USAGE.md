@@ -86,11 +86,11 @@ local mode:
 export CLAUDEFUSCATOR_VAULT_TOKEN='…'
 
 # 2. publish the list everyone should use (needs the manage-identifiers role)
-claudefuscator-agent --publish-identifiers claudefuscator.merged.local.json --version 7
+python agent/claudefuscator_agent.py \n  --publish-identifiers claudefuscator.merged.local.json --version 7
 
 # 3. optional: enrol your key, so your browsers collect it instead of
 #    being typed into. Read the trade-off first - docs/UNVEIL-SERVER.md.
-claudefuscator-agent --enrol-key
+python agent/claudefuscator_agent.py --enrol-key
 ```
 
 and in the config file, the vault's address (the token never goes here):

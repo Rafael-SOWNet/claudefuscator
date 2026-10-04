@@ -131,7 +131,7 @@ AES-GCM( HKDF-SHA256(that person's API token, info="claudefuscator/enrolment/v1"
          aad = "claudefuscator/enrolment/v1" )
 ```
 
-The agent writes it once (`claudefuscator-agent --enrol-key`) and verifies
+The agent writes it once (`claudefuscator_agent.py --enrol-key`) and verifies
 it by reading it back. A browser holding the same API token collects it on
 first use, unwraps it in the service worker, and keeps it in
 `chrome.storage.session` — memory only, gone when the browser closes.
