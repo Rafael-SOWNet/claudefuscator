@@ -7,8 +7,39 @@ addresses — out of what reaches Anthropic, and puts them back locally.
 network is obfuscated. Your terminal shows real values, and tool calls write
 real values to local disk and local shares.
 
-Three surfaces, one shared key, entered independently on each. The key is
-never transmitted between them, never sent to Anthropic, and never committed.
+One shared key derives every token. Everything that must resolve a token
+needs that same key, and it is never sent to Anthropic and never committed.
+
+## What it takes to run this
+
+Be clear-eyed before starting: this is not a one-click extension. What you
+install depends on how far you want to go, and the steps are cumulative.
+
+| | What you get | What you install | Effort |
+|---|---|---|---|
+| **A. One machine, typed key** | Claude Code scrubbed; the browser unveils values you listed | the mod (or the plugin) and, for the browser, the extension — key typed into each | ~15 minutes |
+| **B. Add the local agent** | the browser can also unveil values nobody listed — IPs, hostnames, addresses matched by pattern | a background Python process on your machine | +15 minutes |
+| **C. Add a server** | one identifier list for a team, and the key collected rather than typed | a service **you host**, reusing your own sign-in and access list | a deployment |
+
+**Most people want A, then B.** C exists because a team sharing tokens has to
+share the values behind them, and because telling colleagues to paste a key
+into every browser is how keys end up in chat windows.
+
+### The parts, and why each exists
+
+- **The mod** (or the settings plugin) scrubs what Claude Code sends.
+- **The Chrome extension** restores tokens on claude.ai, which cannot be
+  proxied because the web app talks to claude.ai rather than to the API.
+- **The local agent** is a loopback service. Only it talks to a server, so
+  the mod and the extension never hold a remote credential. Without it, a
+  pattern-matched value shows as an unresolved token in the browser — the
+  extension can only derive what is on its own list.
+- **The server** is not supplied as a product. `server/` is a working
+  reference implementation with tests; the intent is that you fold the same
+  endpoints into something you already run and already control access to.
+  It stores ciphertext it cannot read.
+
+The proxy still works and is no longer the path to recommend; see below.
 
 ```
        your machine                                          Anthropic
@@ -469,9 +500,16 @@ Three properties of that submission are deliberate:
 anyone auditing the mod rather than buried in the source:
 
 ```
-./register.js calls: $.env.get (via load), $.fs.read (via load),
-                     $.http.fetch (via scheduleFlush), $.session.cwd (via load), $.ui.log
+./register.js calls: $.clock.sleep (via collectFromAgent), $.env.get (via load),
+                     $.fs.read (via collectFromAgent, load),
+                     $.http.fetch (via collectFromAgent, scheduleFlush),
+                     $.session.cwd (via load), $.ui.log
 ```
+
+Read that list as the whole of what the mod can do to your machine. It
+reads two environment variables and some files, talks to loopback, and
+logs. It cannot start a process — deliberately, which is why the agent is
+started by the operating system rather than by the mod.
 
 ## Install
 
@@ -504,6 +542,40 @@ cp config/claudefuscator.example.json claudefuscator.local.json   # gitignored
 ```
 
 The key does **not** go in that file.
+
+### The short version, by tier
+
+**A — one machine.** Put the key in `CLAUDEFUSCATOR_KEY`, or in the mod's
+`secret_key` through `/plugin`. Point `config_path` at your list. Done.
+
+**B — add the agent**, so the browser can unveil pattern hits:
+
+```bash
+python agent/claudefuscator_agent.py --status          # what this machine has
+powershell -File tools/windows/install-autostart.ps1   # start it at logon
+python agent/claudefuscator_agent.py --pair            # hand the key to a browser
+```
+
+`--pair` opens a short window; press **Pair with local agent** in the
+extension options. Nothing is typed into the browser — not a key, not a
+token.
+
+**C — add a server.** Once, for the organisation:
+
+```bash
+python agent/claudefuscator_agent.py --connect     # approve this agent in a browser
+python agent/claudefuscator_agent.py --enrol-key   # prompts; stores the key wrapped
+python agent/claudefuscator_agent.py \
+  --publish-identifiers claudefuscator.merged.local.json --version 1
+```
+
+Then each further machine needs `--connect` and the autostart task, and
+nothing else: it collects the key and the list rather than being told them.
+
+`--status` is the thing to run when something is wrong. It reports where
+the key came from, which list is in force, and whether the enrolled key
+matches this machine — and exits non-zero when the machine would not
+actually scrub.
 
 **Proxy mode:**
 
@@ -542,7 +614,34 @@ Per-surface verification notes, with commands:
 
 ## Status
 
-Verified end to end on 2026-10-02:
+**Working, used by its author, and still moving.** Not a 1.0: interfaces
+between the parts have changed more than once, and the server endpoints
+landed recently enough that anyone deploying them should read the commits
+rather than assume stability. The token format itself is the stable part,
+and is versioned precisely so it can stay that way.
+
+What is verified, and how, as of 2026-10-05:
+
+- **Automated**: 244 Python tests, 25 headless-browser checks against the
+  real extension, 14 mod tests run by the engine itself, and the reference
+  server's own suite. `claude plugin validate` passes.
+- **Live, by hand**: approving an agent in a browser and having it receive
+  a credential; enrolling the key and collecting it back on a machine that
+  holds none; pairing a browser with the agent; the agent starting at logon.
+- **Not verified**: the published list being consumed by a second person's
+  machine. One-operator so far, which is exactly where a sharing feature
+  is least tested.
+
+### If you are reading this from a fork
+
+Two things worth knowing. The `server/` directory is a reference, not a
+deployment: it authenticates from a token file, which is right for running
+it on a laptop and wrong for anything else. And `chrome-extension/` names a
+placeholder host in its manifest on purpose — `tools/make-local-extension.ps1`
+generates a copy pointed at your own, outside the repository, so your
+hostnames never land in a public tree.
+
+Earlier verification, from the proxy era (2026-10-02):
 
 - **Real Claude Code through the proxy to the real API.** The typed prompt
   `deploy DEV-100-000123 to build-01.corp.example for Jane Example` left as
