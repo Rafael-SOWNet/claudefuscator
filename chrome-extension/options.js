@@ -100,8 +100,14 @@
         { type: 'claudefuscator-rules', force: true });
 
       if (!reply || reply.reason) {
+        // Partial success is its own outcome. "Not collected" in front of a
+        // run that did collect the key is simply untrue, and would send
+        // somebody chasing a fault that is not there.
+        const lead = (reply && reply.keyCollected)
+          ? 'Key collected. '
+          : 'Not collected: ';
         el.rulesState.textContent =
-          'Not collected: ' + ((reply && reply.reason) || 'no answer from the worker');
+          lead + ((reply && reply.reason) || 'no answer from the worker');
         return;
       }
 

@@ -297,8 +297,19 @@ async function fetchRules(force) {
       cache: 'no-store',
     });
 
-    if (res.status === 404) return { reason: 'no list has been published yet' };
-    if (!res.ok) return { reason: 'the vault answered ' + res.status };
+    /* The key was collected by now - ensureKey ran above and succeeded, or
+     * we would not have got here. Say so, because these two are fetched
+     * together but fail separately: reporting only "no list published"
+     * reads as nothing having worked, when in fact the part that cannot
+     * be done locally just did. */
+    if (res.status === 404) {
+      return { keyCollected: true,
+        reason: 'no shared list has been published yet, so your local '
+          + 'identifier list is still the one in force' };
+    }
+    if (!res.ok) {
+      return { keyCollected: true, reason: 'the vault answered ' + res.status };
+    }
 
     const body = await res.json();
     const text = await ClaudefuscatorVaultCrypto.openDocument(key, {
