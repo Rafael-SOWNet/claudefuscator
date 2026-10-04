@@ -75,7 +75,26 @@
    * empty look identical from here, and only one of them is fine. */
   async function collectFromVault() {
     el.rulesState.textContent = 'collecting…';
-    await chrome.storage.local.set({ vaultToken: el.vaultToken.value.trim() });
+
+    /* Save the config too, not just the token.
+     *
+     * The worker reads what is STORED, so pasting a vault url and pressing
+     * this button without pressing Save first had it judge the previous
+     * config - and report "no vault configured" about a url sitting right
+     * there on screen. A button that silently acts on different values
+     * than the ones displayed is worse than one that refuses.
+     */
+    const toStore = { vaultToken: el.vaultToken.value.trim() };
+    if (el.config.value.trim()) {
+      try {
+        toStore.config = parseConfig(el.config.value);
+      } catch (err) {
+        el.rulesState.textContent = 'Not collected: ' + err.message;
+        return;
+      }
+    }
+    await chrome.storage.local.set(toStore);
+
     try {
       const reply = await chrome.runtime.sendMessage(
         { type: 'claudefuscator-rules', force: true });

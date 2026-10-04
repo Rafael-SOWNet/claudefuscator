@@ -136,11 +136,9 @@ async function collectKey() {
   if (key) return { key };
   if (!vaultToken) return { reason: 'no key configured, and no vault token to collect one with' };
 
-  const origin = vaultOrigin(config);
-  if (!origin) {
-    return { reason: 'the configured vault url is not one this extension may reach: '
-      + allowedOrigins().join(', ') };
-  }
+  const where = vaultOrigin(config);
+  if (where.reason) return { reason: where.reason };
+  const origin = where.url;
 
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
@@ -235,13 +233,40 @@ async function resolve(tokens) {
  * this is the only side that can.
  */
 
+/* Returns { url } or { reason }.
+ *
+ * A reason rather than null, because the three ways this fails need three
+ * different actions and used to produce one message. "No vault in your
+ * config" was reported as "that url is not one this extension may reach",
+ * followed by a list of origins that included the very host the person
+ * thought they had configured - which reads as a bug in the extension and
+ * sends them to look in the wrong place entirely.
+ */
 function vaultOrigin(config) {
   const raw = config && config.vault;
-  if (!raw || typeof raw !== 'object' || raw.enabled === false) return null;
+
+  if (!raw || typeof raw !== 'object') {
+    return { reason: 'your identifier list has no "vault" section. Add '
+      + '{"vault": {"url": "https://…"}} and press Save.' };
+  }
+  if (raw.enabled === false) {
+    return { reason: 'the vault is turned off in your config ("enabled": false).' };
+  }
+
   const url = typeof raw.url === 'string' ? raw.url.trim().replace(/\/$/, '') : '';
-  if (!url) return null;
+  if (!url) return { reason: 'your "vault" section has no "url".' };
+
   // Same rule as resolve: only an origin the manifest already names.
-  return allowedOrigins().includes(url) ? url : null;
+  if (!allowedOrigins().includes(url)) {
+    // Both sides of the comparison. Printing only the permitted list left
+    // no way to see that the configured value was, say, carrying a path or
+    // a port - the two strings look identical in a sentence that shows one.
+    return { reason: `this extension may not reach ${url}. It may reach: `
+      + allowedOrigins().join(', ')
+      + '. Widening that is a manifest change, not a setting.' };
+  }
+
+  return { url };
 }
 
 async function fetchRules(force) {
@@ -258,11 +283,9 @@ async function fetchRules(force) {
   if (held.reason) return { reason: held.reason };
   const key = held.key;
 
-  const origin = vaultOrigin(config);
-  if (!origin) {
-    return { reason: 'the configured vault url is not one this extension may reach: '
-      + allowedOrigins().join(', ') };
-  }
+  const where = vaultOrigin(config);
+  if (where.reason) return { reason: where.reason };
+  const origin = where.url;
 
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
