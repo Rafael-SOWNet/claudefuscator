@@ -41,8 +41,17 @@ between them and never sent to Anthropic.
 
 ```bash
 # any long random string; generate one if you like
-node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
+
+32 bytes rather than 24 for one reason: everything here is symmetric
+(HMAC-SHA256, HKDF-SHA256, AES-256-GCM), so the only quantum attack that
+applies is Grover's, which halves the effective strength. 32 bytes leaves
+~128 bits against that; 24 leaves ~96. There is no public-key crypto
+anywhere in Claudefuscator, so Shor's algorithm has nothing to work on, and
+a key generated this way needs no migration plan. An existing 24-byte key
+is fine and not urgent to rotate — changing it makes every token in every
+archived conversation unrestorable.
 
 Keep it somewhere you can retrieve it (a password manager). If you lose it,
 every token already in a conversation becomes unrestorable — the mapping only
@@ -51,6 +60,104 @@ ever exists as a derivation from the key.
 > Do not paste the key into a chat, a commit, or any file in the repo.
 > `.gitignore` covers the obvious filenames, but it cannot save you from
 > putting it somewhere unexpected.
+
+### Two ways to run it
+
+Everything below works in either, and you can start local and move later —
+the key does not change, so nothing already tokenized breaks.
+
+| | **Local mode** | **Central vault mode** |
+|---|---|---|
+| Who has the key | you, typed into each side | you, typed into the agent; collected by browsers |
+| The identifier list | a file you edit and copy around | published once, fetched by everybody |
+| What you need running | nothing | a Claudefuscator server, and the agent for the browser |
+| Good for | one person, one machine, trying it out | a team that must hide the same things |
+
+**Local mode** is the default and needs no server. Set `CLAUDEFUSCATOR_KEY`
+and `CLAUDEFUSCATOR_CONFIG`, paste the same key and list into the extension,
+done. Everything in sections 2–5 applies as written.
+
+**Central vault mode** adds a server so the list is governed in one place
+and browsers stop asking people to retype the key.
+
+First, where the key comes from. The agent looks in two places, in order:
+
+1. `CLAUDEFUSCATOR_KEY` in the environment
+2. `secret_key` in the **Claude Code plugin config** — the same setting the
+   mod reads, so one entry serves both
+
+Set the second from inside Claude Code (`/plugin`, pick claudefuscator,
+then configure) and nothing needs exporting per shell. The agent takes
+`config_path` from there too, so it works on the same identifier list the
+mod does rather than a second copy that can drift from it.
+
+The trade, once: a key in the plugin config sits on disk in plaintext,
+where an exported one lives only in that process. That is already true of
+the mod, which is the argument for one place rather than two — but if you
+would rather the key never touch disk, export it per shell and the agent
+will prefer it.
+
+Then, on each machine:
+
+```bash
+# 1. approve this agent in the browser. You sign in there; no credential
+#    is ever shown to you or pasted anywhere.
+python agent/claudefuscator_agent.py --connect
+
+# 2. start it at logon, so the browser extension and the mod both find it
+powershell -ExecutionPolicy Bypass -File tools/windows/install-autostart.ps1
+
+# 3. check what this machine is actually working with
+python agent/claudefuscator_agent.py --status
+```
+
+Once, for the organisation rather than per machine:
+
+```bash
+# publish the list everyone should use (needs the manage-identifiers role)
+python agent/claudefuscator_agent.py \
+  --publish-identifiers claudefuscator.merged.local.json --version 7
+
+# enrol the key, so every machine collects it instead of being told it.
+# Prompts for it; nothing is exported or pasted into a shell.
+# Read the trade-off first - docs/UNVEIL-SERVER.md.
+python agent/claudefuscator_agent.py --enrol-key
+```
+
+After that a new machine needs **step 1 and 2 and nothing else**. No key,
+no identifier list, no `secret_key`, no `config_path`: the agent collects
+both from the server and the mod collects them from the agent.
+
+`--status` is how you check that, and it exits non-zero when the machine
+would not actually scrub:
+
+```
+Key          : from the vault, fingerprint ad412e6e
+Identifiers  : …/.claudefuscator/identifiers.json
+Vault        : https://ai.example.com
+Credential   : stored (Windows DPAPI, tied to this user account)
+Enrolled key : matches this machine (ad412e6e)
+```
+
+That last line is the one to read. Two different keys both scrub and both
+look fine, and neither side can resolve the other's tokens — which
+presents as the vault losing data rather than as two keys being in play.
+
+and in the config file, the vault's address (the token never goes here):
+
+```json
+{
+  "identifiers": [],
+  "vault": { "enabled": true, "url": "https://ai.example.com", "product": "widget" }
+}
+```
+
+Step 3 is genuinely optional and separable: without it the server still
+governs the list, and each browser still has its key typed in once. With
+it, a browser holding your API token collects the key on first use and
+keeps it in memory until the browser closes. What that costs is written out
+in `docs/UNVEIL-SERVER.md` under "the one exception" — read it before
+enrolling, not after.
 
 ---
 
@@ -409,8 +516,9 @@ cannot be proxied. The extension restores tokens in the page instead.
 3. **Load unpacked** → select `chrome-extension/` in this repo
 4. Consider a separate Chrome profile for the first run
 
-There is no background service worker, so the card shows no "service worker"
-link. That is expected.
+The card shows a **service worker** link: that is `background.js`, which is
+the only part of the extension allowed to make a network call. Everything
+the page itself does is offline.
 
 ### Configure
 
@@ -424,6 +532,31 @@ link. That is expected.
 5. **Test** derives the tokens locally so you can compare them against the
    other side
 
+#### Or: collect both from the server
+
+In central vault mode you leave **Key** empty and fill in **Vault API
+token** instead, with the vault's url in the identifier-list JSON:
+
+```json
+{ "identifiers": [], "vault": { "url": "https://ai.example.com" } }
+```
+
+First, one edit the options page cannot make for you: add your server's
+origin to `host_permissions` in `manifest.json` (it ships with the
+placeholder `https://ai.example.com/*`) and to the `connect-src` beside it,
+then reload the extension. This is deliberately a manifest change rather
+than a config field — widening where the extension may send real values
+should not be something a settings page, or a server, can do.
+
+Then press **Collect key and shared list now**. The extension fetches the list
+and unwraps the key you enrolled with `--enrol-key`, and holds both in
+memory for this browser session — nothing is written to disk, and closing
+the browser discards them. The next session collects them again.
+
+A typed **Key** always wins over a collected one, so a filled-in field is
+never silently ignored. If collection fails the page says why; it does not
+fall back to scrubbing nothing in silence.
+
 ### What it does and does not do
 
 - Restores tokens in conversation text, in streamed updates, and inside
@@ -434,12 +567,15 @@ link. That is expected.
 - Restores pattern matches (an IP or email it was never told about) **only
   if a local agent is configured and running** — on its own the extension
   knows nothing but the values on your list, and marks the rest red.
-- Contacts exactly one host: the loopback agent. `permissions` is still
-  `["storage"]`; `host_permissions` names loopback and nothing else; the
-  only `fetch` lives in `background.js`, and it will not call an origin the
-  manifest does not list. Every value it gets back is checked against your
-  key before it is shown, so an agent cannot make the page display a value
-  your key does not vouch for.
+- Contacts at most two hosts: the loopback agent, for values it cannot
+  derive, and your Claudefuscator server, for the shared list and your
+  enrolled key. `permissions` is still `["storage"]`; `host_permissions`
+  names those origins and nothing else; the only `fetch` lives in
+  `background.js`, and it will not call an origin the manifest does not
+  list. Every value it gets back is checked against your key before it is
+  shown, so neither an agent nor a server can make the page display a value
+  your key does not vouch for. A shared list can change *what* is hidden; it
+  cannot change where anything is sent.
 
 Stored in `chrome.storage.local` — deliberately **not** `chrome.storage.sync`,
 which would upload the key and your real identifiers to a Google account.

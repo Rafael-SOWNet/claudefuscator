@@ -68,7 +68,8 @@ function chromiumPath() {
   return null;
 }
 
-function buildTestExtension(tokens, agentOrigin) {
+function buildTestExtension(tokens, agentOrigin, options) {
+  const opts = options || {};
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-e2e-ext-'));
   for (const f of fs.readdirSync(EXT_SRC)) {
     const src = path.join(EXT_SRC, f);
@@ -78,11 +79,16 @@ function buildTestExtension(tokens, agentOrigin) {
   /* Stands in for the options page. Runs at document_start; content.js reads
    * storage at document_idle, and its storage.onChanged listener covers the
    * case where this has not landed yet. */
-  const config = agentOrigin ? { ...CONFIG, agent: { url: agentOrigin } } : CONFIG;
+  let config = agentOrigin ? { ...CONFIG, agent: { url: agentOrigin } } : CONFIG;
+  if (opts.vaultOrigin) config = { ...config, vault: { url: opts.vaultOrigin } };
+
+  /* In the vault scenario no key is seeded at all: the point of that
+   * run is that the browser arrives holding nothing and collects one. */
+  const seed = opts.vaultToken
+    ? { config, vaultToken: opts.vaultToken }
+    : { key: KEY, config };
   fs.writeFileSync(path.join(dir, 'e2e-seed.js'),
-    'chrome.storage.local.set(' +
-    JSON.stringify({ key: KEY, config }) +
-    ');\n');
+    'chrome.storage.local.set(' + JSON.stringify(seed) + ');\n');
 
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
   const local = ['http://127.0.0.1/*', 'http://localhost/*'];
@@ -98,10 +104,11 @@ function buildTestExtension(tokens, agentOrigin) {
    * is the harness widening its own reach, not the extension's: what is
    * under test is that the extension reaches ONLY what its manifest allows,
    * and that set is still exactly one loopback origin. */
-  if (agentOrigin) {
-    manifest.host_permissions = [agentOrigin + '/*'];
+  const reachable = [agentOrigin, opts.vaultOrigin].filter(Boolean);
+  if (reachable.length) {
+    manifest.host_permissions = reachable.map((o) => o + '/*');
     manifest.content_security_policy.extension_pages =
-      "script-src 'self'; object-src 'self'; connect-src 'self' " + agentOrigin;
+      "script-src 'self'; object-src 'self'; connect-src 'self' " + reachable.join(' ');
   }
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   return dir;
@@ -140,6 +147,62 @@ function serveAgent({ auth, good, poisoned }) {
   });
 }
 
+/* Wraps a key the way agent/vault_crypto.wrap_key does.
+ *
+ * Written out here rather than imported deliberately: if this harness and
+ * the extension agreed only because they shared code, the test would prove
+ * nothing about the agent that actually does the enrolling.
+ *
+ * Note the 32-zero-byte salt. Python's HKDF(salt=None) substitutes a zero
+ * block of the hash length; WebCrypto takes the salt literally, so an empty
+ * array derives a different key and nothing opens, with no hint as to why. */
+async function wrapKeyLikeTheAgent(secret, apiToken) {
+  const enc = new TextEncoder();
+  const label = 'claudefuscator/enrolment/v1';
+  const base = await crypto.subtle.importKey(
+    'raw', enc.encode(apiToken), 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: enc.encode(label) },
+    base, 256);
+  const wrapping = await crypto.subtle.importKey(
+    'raw', bits, { name: 'AES-GCM' }, false, ['encrypt']);
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce, additionalData: enc.encode(label) },
+    wrapping, enc.encode(secret));
+  return {
+    envelopeVersion: 1,
+    nonce: Buffer.from(nonce).toString('base64'),
+    ciphertext: Buffer.from(new Uint8Array(ct)).toString('base64'),
+  };
+}
+
+/* A stand-in for the Claudefuscator server: hands the wrapped key to
+ * whoever presents the right bearer token, and nothing to anyone else. */
+function serveVault({ apiToken, wrapped }) {
+  const seen = { auth: [], paths: [] };
+  const server = http.createServer((req, res) => {
+    seen.auth.push(req.headers.authorization || null);
+    seen.paths.push(req.url);
+    if (req.headers.authorization !== 'Bearer ' + apiToken) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end('{"error":"unauthorized"}');
+      return;
+    }
+    if (req.url.endsWith('/key')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(wrapped));
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end('{"error":"not published"}');
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ server, origin: `http://127.0.0.1:${server.address().port}`, seen }));
+  });
+}
+
 function serveFixture(tokens) {
   let html = fs.readFileSync(FIXTURE, 'utf8');
   for (const [name, value] of Object.entries(tokens)) {
@@ -161,6 +224,113 @@ const results = [];
 function check(name, ok, detail) {
   results.push({ name, ok, detail });
   console.log((ok ? '  PASS  ' : '  FAIL  ') + name + (ok || !detail ? '' : '\n          ' + detail));
+}
+
+/* ---- scenario two: the key comes from the vault ----------------------
+ *
+ * The first scenario seeds a key into this profile, which is local mode.
+ * This one seeds none: only a bearer token and a vault url. Everything it
+ * then unveils had to come from a key the worker collected and held in
+ * memory for the session.
+ *
+ * What it is really holding is the pair of claims made to the user: that
+ * nobody has to retype the key into every browser, and that the browser
+ * does not keep it.
+ */
+async function runVaultScenario(exe, tokens, fixtureOrigin) {
+  const API_TOKEN = 'e2e-api-token-not-a-real-one';
+  const wrapped = await wrapKeyLikeTheAgent(KEY, API_TOKEN);
+  const vault = await serveVault({ apiToken: API_TOKEN, wrapped });
+
+  const extDir = buildTestExtension(tokens, null, {
+    vaultOrigin: vault.origin,
+    vaultToken: API_TOKEN,
+  });
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-e2e-vprof-'));
+
+  const args = [
+    `--disable-extensions-except=${extDir}`,
+    `--load-extension=${extDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+  ];
+  if (!HEADED) args.push('--headless=new');
+
+  const ctx = await chromium.launchPersistentContext(profile, {
+    executablePath: exe,
+    headless: false,
+    args,
+  });
+
+  const external = [];
+  ctx.on('request', (req) => {
+    const url = req.url();
+    if (url.startsWith(fixtureOrigin) || url.startsWith('data:') || url.startsWith('about:')
+        || url.startsWith('chrome-extension://') || url.startsWith('blob:')) return;
+    if (url.startsWith(vault.origin)) return;
+    external.push(url);
+  });
+
+  try {
+    const page = await ctx.newPage();
+    await page.goto(fixtureOrigin + '/', { waitUntil: 'load' });
+    await page.waitForTimeout(2000);   // collect, then restore
+
+    // #msg-1 is in the served HTML; #stream is filled by the first
+    // scenario's script calls and is empty here.
+    const body = await page.locator('#msg-1').innerText();
+    check('a browser with no key of its own unveils using the collected one',
+      body.includes(REAL_HOST) && !body.includes(tokens.HOST_TOKEN),
+      'got: ' + body.slice(0, 160));
+
+    check('the vault was asked for the key, with the bearer token',
+      vault.seen.paths.some((u) => u.endsWith('/key'))
+        && vault.seen.auth.every((a) => a === 'Bearer ' + API_TOKEN),
+      'paths: ' + vault.seen.paths.join(', '));
+
+    /* Once per browser session, not once per page or per wake-up. More
+     * than a couple of fetches here means storage.session is not doing
+     * the job it was chosen for. */
+    const keyFetches = vault.seen.paths.filter((u) => u.endsWith('/key')).length;
+    check('the key was collected once, not once per page',
+      keyFetches === 1, 'fetches: ' + keyFetches);
+
+    /* The claim the user asked for in as many words: fetched for the
+     * session, not stored. storage.local is what survives the browser
+     * closing, so the key must not be in it. */
+    const worker = ctx.serviceWorkers()[0];
+    const extensionId = worker ? new URL(worker.url()).host : null;
+    if (!extensionId) {
+      check('the collected key is not written to disk', false,
+        'no service worker to read the extension id from');
+    } else {
+      /* Read from an extension page, which is the only context that can
+       * see both storage areas. storage.local survives the browser
+       * closing; storage.session does not. The key must be in the second
+       * and absent from the first. */
+      const probe = await ctx.newPage();
+      await probe.goto('chrome-extension://' + extensionId + '/options.html');
+      const stored = await probe.evaluate(async () => ({
+        local: await chrome.storage.local.get(null),
+        session: await chrome.storage.session.get(null),
+      }));
+      await probe.close();
+
+      check('the collected key is held for the session, not written to disk',
+        !JSON.stringify(stored.local).includes(KEY)
+          && JSON.stringify(stored.session).includes(KEY),
+        'local keys: ' + Object.keys(stored.local).join(', ')
+          + ' | session keys: ' + Object.keys(stored.session).join(', '));
+    }
+
+    check('the extension contacted nothing but the vault', external.length === 0,
+      'external: ' + external.join(', '));
+  } finally {
+    await ctx.close();
+    vault.server.close();
+    fs.rmSync(profile, { recursive: true, force: true });
+    fs.rmSync(extDir, { recursive: true, force: true });
+  }
 }
 
 async function main() {
@@ -368,11 +538,13 @@ async function main() {
       !JSON.stringify(agent.seen).includes(KEY));
   } finally {
     await ctx.close();
-    server.close();
     agent.server.close();
     fs.rmSync(profile, { recursive: true, force: true });
     fs.rmSync(extDir, { recursive: true, force: true });
   }
+
+  await runVaultScenario(exe, tokens, origin);
+  server.close();
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

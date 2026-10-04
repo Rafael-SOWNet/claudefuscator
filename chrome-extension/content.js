@@ -340,6 +340,18 @@
   function watchConfig() {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
+
+      /* The worker collected a key or a list. What it collected lives in
+       * storage.session, which a content script cannot see - only this
+       * timestamp crosses, and it is enough to know to ask again. */
+      if (changes.collectedAt) {
+        init().then((ready) => {
+          if (!ready) return;
+          start();
+          scanSubtree(document.body);
+        }).catch(() => {});
+        return;
+      }
       if (changes.highlight && !changes.key && !changes.config) {
         highlightOn = changes.highlight.newValue !== false;
         paint();
@@ -357,20 +369,53 @@
     });
   }
 
+  /* Asks the worker for something, tolerating the worker being asleep or
+   * gone. A failed ask must leave the page inert, never half-configured. */
+  async function askWorker(type) {
+    try {
+      return await chrome.runtime.sendMessage({ type });
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function init() {
     const stored = await chrome.storage.local.get(['key', 'config', 'highlight']);
     /* Default on: seeing what was unveiled is the point of the toggle, and a
      * setting nobody has touched yet should show more, not less. */
     highlightOn = stored.highlight !== false;
-    if (!stored.key) { vault = null; secret = null; return false; }
+
+    /* In vault mode nothing is typed into this profile: the worker holds
+     * the key for the browser session, having collected it once. Asking it
+     * is the only way the content script can see that key - it has no
+     * network of its own and must not grow one. */
+    let key = stored.key;
+    if (!key) {
+      const held = await askWorker('claudefuscator-key');
+      key = held && held.key;
+    }
+    if (!key) { vault = null; secret = null; return false; }
+
     let cfg = stored.config;
     if (typeof cfg === 'string') {
       try { cfg = JSON.parse(cfg); } catch (_) { cfg = null; }
     }
+
+    /* The published list wins over the local one where both exist, because
+     * the point of publishing is that everybody hides the same things. What
+     * does NOT come from the vault is where this extension may connect:
+     * that stays local config, and ultimately the manifest, so a server can
+     * never talk a browser into sending real values somewhere new. */
+    const shared = await askWorker('claudefuscator-rules');
+    if (shared && shared.rules) {
+      cfg = Object.assign({}, cfg || {}, shared.rules,
+                          { agent: (cfg || {}).agent, vault: (cfg || {}).vault });
+    }
+
     if (!cfg) { vault = null; secret = null; return false; }
     try {
-      vault = await core.buildVault(stored.key, cfg);
-      secret = stored.key;
+      vault = await core.buildVault(key, cfg);
+      secret = key;
       buildShapeMatcher();
       /* A new key or list changes what is derivable, so questions already
        * put to the agent under the old one should be asked again. */

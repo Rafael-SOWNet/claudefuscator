@@ -389,6 +389,115 @@ public sealed class VaultTests : IClassFixture<VaultFactory>
         Assert.True(json.RootElement.TryGetProperty("unresolved", out _));
         Assert.True(json.RootElement.TryGetProperty("withheld", out _));
     }
+
+    // --- the wrapped key --------------------------------------------------
+
+    private static PutWrappedKeyRequest Wrapped(string marker)
+        => new(1, Convert.ToBase64String(new byte[12]),
+               Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("wrapped:" + marker)));
+
+    [Fact]
+    public async Task A_key_that_was_never_enrolled_is_absent_rather_than_empty()
+    {
+        var (factory, client) = Fresh(VaultFactory.AlphaToken);
+        using var _ = factory;
+        using var __ = client;
+
+        // An empty envelope would unwrap to an empty key and scrub nothing,
+        // which is the failure this project cares most about looking like
+        // success. Absent must be distinguishable.
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/vault/key")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Enrolling_stores_a_key_only_its_owner_can_read_back()
+    {
+        var (factory, alpha) = Fresh(VaultFactory.AlphaToken);
+        using var _ = factory;
+        using var __ = alpha;
+
+        (await alpha.PutAsJsonAsync("/api/vault/key", Wrapped("alpha"))).EnsureSuccessStatusCode();
+
+        var mine = await (await alpha.GetAsync("/api/vault/key")).Content
+            .ReadFromJsonAsync<WrappedKeyDto>();
+        Assert.Equal(Wrapped("alpha").Ciphertext, mine!.Ciphertext);
+
+        // Somebody else's enrolment is not theirs to fetch. The blob is
+        // wrapped, but handing it out gives an attacker something to work on
+        // offline against a token they might later obtain.
+        using var manager = factory.CreateClient();
+        manager.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", VaultFactory.ManagerToken);
+        Assert.Equal(HttpStatusCode.NotFound, (await manager.GetAsync("/api/vault/key")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Enrolling_cannot_overwrite_somebody_elses_key()
+    {
+        var (factory, alpha) = Fresh(VaultFactory.AlphaToken);
+        using var _ = factory;
+        using var __ = alpha;
+        await alpha.PutAsJsonAsync("/api/vault/key", Wrapped("alpha"));
+
+        using var manager = factory.CreateClient();
+        manager.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", VaultFactory.ManagerToken);
+        await manager.PutAsJsonAsync("/api/vault/key", Wrapped("manager"));
+
+        // Clobbering alpha's row would lock alpha out of every value they
+        // had sealed, with nothing to point at: the browser would simply
+        // stop unveiling.
+        var mine = await (await alpha.GetAsync("/api/vault/key")).Content
+            .ReadFromJsonAsync<WrappedKeyDto>();
+        Assert.Equal(Wrapped("alpha").Ciphertext, mine!.Ciphertext);
+    }
+
+    [Fact]
+    public async Task Re_enrolling_replaces_the_previous_wrapping()
+    {
+        var (factory, alpha) = Fresh(VaultFactory.AlphaToken);
+        using var _ = factory;
+        using var __ = alpha;
+
+        // Rotating an API token invalidates the old wrapping, so enrolling
+        // again has to supersede rather than accumulate.
+        await alpha.PutAsJsonAsync("/api/vault/key", Wrapped("before"));
+        await alpha.PutAsJsonAsync("/api/vault/key", Wrapped("after"));
+
+        var current = await (await alpha.GetAsync("/api/vault/key")).Content
+            .ReadFromJsonAsync<WrappedKeyDto>();
+        Assert.Equal(Wrapped("after").Ciphertext, current!.Ciphertext);
+    }
+
+    [Fact]
+    public async Task The_wrapped_key_needs_a_token_like_everything_else()
+    {
+        var (factory, _unused) = Fresh(VaultFactory.AlphaToken);
+        using var _ = factory;
+        using var __ = _unused;
+
+        using var anonymous = factory.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await anonymous.GetAsync("/api/vault/key")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await anonymous.PutAsJsonAsync("/api/vault/key", Wrapped("anon"))).StatusCode);
+    }
+
+    [Fact]
+    public async Task The_server_stores_the_wrapping_without_the_key_in_it()
+    {
+        var (factory, alpha) = Fresh(VaultFactory.AlphaToken);
+        using var _ = factory;
+        using var __ = alpha;
+        await alpha.PutAsJsonAsync("/api/vault/key", Wrapped("secret-key-material"));
+
+        var raw = await (await alpha.GetAsync("/api/vault/key")).Content.ReadAsStringAsync();
+
+        // Real wrapping is AES-GCM in the client; this only holds the server
+        // to storing and returning what it was given, never deriving
+        // anything readable from it.
+        Assert.DoesNotContain("secret-key-material", raw, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>Hosts the real app against a throwaway database and token file.</summary>

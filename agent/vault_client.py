@@ -34,6 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import credentials
 import vault_crypto as vc
 
 
@@ -80,6 +81,10 @@ class VaultClient:
         self.product = product
         self.timeout = timeout
         self.last_error = None
+        # The HTTP status behind the last failure, where there was one.
+        # Callers need to tell "nothing there yet" from "refused" without
+        # parsing an English sentence.
+        self.last_status = None
 
     # ---- configuration -------------------------------------------------
 
@@ -112,11 +117,23 @@ class VaultClient:
                           f'refusing {url}')
 
         token = os.environ.get('CLAUDEFUSCATOR_VAULT_TOKEN', '').strip()
+
         if not token:
-            # Deliberately not read from the config file: that file is
-            # shared, diffed and sometimes pasted. A credential belongs in
-            # the environment.
-            return None, 'no CLAUDEFUSCATOR_VAULT_TOKEN set'
+            # Then whatever `--connect` stored for THIS host. Scoped to the
+            # url inside the store, so a credential issued for one vault is
+            # never presented to another.
+            #
+            # Still deliberately not read from the config file: that file is
+            # shared, diffed and sometimes pasted, which is exactly what a
+            # credential must not be.
+            try:
+                token = credentials.load(url) or ''
+            except credentials.CredentialError as e:
+                return None, str(e)
+
+        if not token:
+            return None, ('not connected - run the agent with --connect, or set '
+                          'CLAUDEFUSCATOR_VAULT_TOKEN')
 
         return cls(url, token, secret, product=raw.get('product')), f'ACTIVE ({url})'
 
@@ -146,6 +163,7 @@ class VaultClient:
                 return None
             # Status only. The body of an error from an authenticated
             # endpoint can echo the request, and the request carries tokens.
+            self.last_status = e.code
             self.last_error = f'vault answered {e.code}'
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
             self.last_error = f'vault unreachable: {type(e).__name__}'
@@ -206,6 +224,52 @@ class VaultClient:
             out[token] = value
 
         return out
+
+    # ---- key enrolment ---------------------------------------------------
+
+    def enrol_key(self):
+        """Wrap this machine's key under our API token and store it.
+
+        Done once per person rather than once per browser: afterwards any
+        browser holding the same token collects the key for its session
+        without anybody retyping it.
+        """
+        if not self.secret:
+            return False, 'no key'
+        try:
+            wrapped = vc.wrap_key(self.secret, self._token)
+        except vc.VaultCryptoError as e:
+            return False, str(e)
+
+        self.last_error = None
+        reply = self._request('PUT', '/api/vault/key', {
+            'envelopeVersion': wrapped['v'],
+            'nonce': wrapped['n'],
+            'ciphertext': wrapped['ct'],
+        })
+        if reply is None:
+            return False, self.last_error or 'the vault refused it'
+        return True, None
+
+    def fetch_key(self):
+        """The enrolled key, unwrapped, or None.
+
+        Used to check enrolment worked. The agent does not need this - it
+        already has the key - but being unable to verify an enrolment from
+        the same tool that performed it would make the whole arrangement
+        unfalsifiable.
+        """
+        self.last_error = None
+        reply = self._get('/api/vault/key')
+        if not reply:
+            return None
+        try:
+            return vc.unwrap_key({'v': reply.get('envelopeVersion'),
+                                  'n': reply.get('nonce'),
+                                  'ct': reply.get('ciphertext')}, self._token)
+        except vc.VaultCryptoError as e:
+            self.last_error = str(e)
+            return None
 
     # ---- the shared identifier list ------------------------------------
 

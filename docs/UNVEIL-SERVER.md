@@ -108,17 +108,52 @@ So two things are stricter here:
 
 These are not copied from `ai.example.com`; they come from this payload.
 
-### 1. The server never holds the key
+### 1. The server cannot read anything it stores
 
 Tokens are `HMAC(key, "claudefuscator/v1/TYPE/value")`. The server stores
-`token -> value` pairs. It never needs the key to do that, so **it must
-never be given one.** A compromised server then yields the mappings it
-holds, which is bad, but it does not let the attacker derive tokens for
-values it has never seen, and it does not compromise projects whose
-mappings it does not store.
+`token -> sealed value` pairs. It never needs the key to do that, and it is
+never given one it can use: a compromised server yields ciphertext, so an
+attacker cannot derive tokens for values it has never seen, and projects
+whose rows it does not hold are untouched.
 
-Nothing in the schema, the config or the API takes a key. If a future change
-appears to need one, that is the signal to stop and redesign.
+Nothing in the schema, the config or the API takes a usable key. If a future
+change appears to need one, that is the signal to stop and redesign.
+
+#### The one exception, and what it costs
+
+This section used to be titled "the server never holds the key", and that
+was true until browsers had to stop asking people to retype it. `PUT
+/api/vault/key` now stores one blob per person:
+
+```
+AES-GCM( HKDF-SHA256(that person's API token, info="claudefuscator/enrolment/v1"),
+         the Claudefuscator key,
+         aad = "claudefuscator/enrolment/v1" )
+```
+
+The agent writes it once (`claudefuscator_agent.py --enrol-key`) and verifies
+it by reading it back. A browser holding the same API token collects it on
+first use, unwraps it in the service worker, and keeps it in
+`chrome.storage.session` — memory only, gone when the browser closes.
+
+**What this keeps.** The server stores only `SHA-256` of each API token, so
+it cannot derive the wrapping key. A database dump, a backup, a stolen disk
+or a read-only SQL injection yields a blob nothing on the host can open. The
+row is per owner, served only to its owner, and cannot be overwritten by
+anyone else.
+
+**What it gives up, plainly.** An API token arrives in plaintext on every
+request. Code execution on the *running* host can harvest one and unwrap
+that person's key, and from the key everything else in the vault follows.
+That is a real reduction in the worst case, and no arrangement avoids it
+once a server distributes keys at all. It is the price of not typing the key
+into every browser; if that trade is wrong for a deployment, do not enrol —
+nothing else depends on it, and typing the key into the options page still
+works.
+
+**What it does not change.** The server still cannot read a value row, still
+cannot read the identifier list, and still gains nothing from the wrapped
+key by itself. "The server has the key now" is not a true summary of this.
 
 ### 2. Clients verify integrity; the server is not trusted for it
 

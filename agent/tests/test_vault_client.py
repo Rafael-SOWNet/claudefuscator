@@ -33,6 +33,7 @@ class FakeVault(BaseHTTPRequestHandler):
 
     rows = {}
     document = None
+    wrapped_key = None
     seen = {'auth': [], 'tokens': [], 'submitted': []}
     protocol_version = 'HTTP/1.1'
 
@@ -40,6 +41,17 @@ class FakeVault(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.endswith('/key'):
+            FakeVault.seen['auth'].append(self.headers.get('Authorization'))
+            if FakeVault.wrapped_key is None:
+                self.send_response(404); self.send_header('Content-Length','0'); self.end_headers(); return
+            out = json.dumps(FakeVault.wrapped_key).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+            return
         if not self.path.endswith('/identifiers') or FakeVault.document is None:
             self.send_response(404); self.send_header('Content-Length','0'); self.end_headers(); return
         out = json.dumps(FakeVault.document).encode()
@@ -53,6 +65,15 @@ class FakeVault(BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length') or 0)
         body = json.loads(self.rfile.read(length) or b'{}')
         FakeVault.seen['auth'].append(self.headers.get('Authorization'))
+        if self.path.endswith('/key'):
+            FakeVault.wrapped_key = body
+            out = b'{"stored":true}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+            return
         current = FakeVault.document
         if current and body.get('version', 0) <= current.get('version', 0):
             self.send_response(409); self.send_header('Content-Length','0'); self.end_headers(); return
@@ -102,6 +123,7 @@ def row_for(token, value, key=KEY, product=None):
 def vault():
     FakeVault.rows = {}
     FakeVault.document = None
+    FakeVault.wrapped_key = None
     FakeVault.seen = {'auth': [], 'tokens': [], 'submitted': []}
     server = ThreadingHTTPServer(('127.0.0.1', 0), FakeVault)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -434,3 +456,119 @@ def test_without_a_vault_the_agent_behaves_exactly_as_before(tmp_path):
                         tmp_path / 'cache.json')
     store.submit([{'token': TOKEN, 'value': REAL_IP}])
     assert store.resolve([TOKEN]) == {TOKEN: REAL_IP}
+
+
+# ---- enrolment -------------------------------------------------------
+
+# A bearer credential, which is a different thing from TOKEN above - that
+# one is a Claudefuscator identifier token. Sharing a name between the two
+# would make these tests read as asserting something they do not.
+API_TOKEN = 'reference-api-token-not-a-real-one'
+
+
+def _client(url, key=KEY):
+    client, _ = VaultClient.from_config(
+        {'vault': {'enabled': True, 'url': url}}, key)
+    return client
+
+
+def test_enrolling_stores_something_the_key_is_not_in(vault, monkeypatch):
+    url, fake = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    client = _client(url)
+
+    ok, err = client.enrol_key()
+    assert ok, err
+
+    # What went up must be opaque. The whole justification for the server
+    # holding anything key-shaped is that a dump of this row is useless.
+    assert KEY not in json.dumps(fake.wrapped_key)
+
+
+def test_what_was_enrolled_reads_back_as_the_same_key(vault, monkeypatch):
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    client = _client(url)
+    client.enrol_key()
+
+    # Enrolling the wrong thing would only surface later, in a browser that
+    # quietly unveils nothing, so the agent checks here.
+    assert client.fetch_key() == KEY
+
+
+def test_another_token_cannot_read_the_enrolment_back(vault, monkeypatch):
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    _client(url).enrol_key()
+
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', 'somebody-elses-token')
+    other = _client(url)
+    # The fake vault serves the row to anyone; the wrapping is what refuses.
+    # That is deliberate - this asserts the client does not depend on the
+    # server being the thing that says no.
+    assert other.fetch_key() is None
+    assert other.last_error
+
+
+def test_nothing_enrolled_is_not_an_error(vault, monkeypatch):
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    client = _client(url)
+    assert client.fetch_key() is None
+
+
+# ---- a machine that holds no key at all -------------------------------
+
+def test_the_key_can_come_from_the_vault_when_nothing_is_local(vault, monkeypatch):
+    """The end state the whole connect/enrol flow exists for: a machine
+    with no key configured anywhere still scrubs, because it collects the
+    enrolled one."""
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+
+    # Somebody enrolled it once, from a machine that did have it.
+    _client(url).enrol_key()
+
+    import claudefuscator_agent as agent_mod
+    agent_mod._VAULT_KEY.clear()
+    config = {'vault': {'enabled': True, 'url': url}}
+    monkeypatch.setattr(agent_mod, 'load_config', lambda *_a, **_k: config)
+
+    key, source = agent_mod.resolve_key()
+    assert key == KEY
+    assert source == 'the vault'
+
+
+def test_enrolment_never_takes_its_input_from_the_vault(vault, monkeypatch):
+    """Otherwise --enrol-key with no local key would write back whatever
+    is already there, and report success for having changed nothing."""
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    _client(url).enrol_key()
+
+    import claudefuscator_agent as agent_mod
+    agent_mod._VAULT_KEY.clear()
+    config = {'vault': {'enabled': True, 'url': url}}
+    monkeypatch.setattr(agent_mod, 'load_config', lambda *_a, **_k: config)
+
+    assert agent_mod.resolve_key(allow_vault=False) == (None, None)
+
+
+def test_a_local_key_still_wins_over_the_enrolled_one(vault, monkeypatch):
+    """Rotation would otherwise be impossible: the machine doing the
+    rotating must be able to use its new key before publishing it."""
+    url, _ = vault
+    monkeypatch.setenv('CLAUDEFUSCATOR_VAULT_TOKEN', API_TOKEN)
+    _client(url).enrol_key()
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', 'a-different-local-key')
+
+    import claudefuscator_agent as agent_mod
+    agent_mod._VAULT_KEY.clear()
+    config = {'vault': {'enabled': True, 'url': url}}
+    monkeypatch.setattr(agent_mod, 'load_config', lambda *_a, **_k: config)
+
+    key, source = agent_mod.resolve_key()
+    assert key == 'a-different-local-key'
+    assert source == 'CLAUDEFUSCATOR_KEY'
