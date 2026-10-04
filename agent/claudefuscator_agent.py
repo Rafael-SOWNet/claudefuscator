@@ -33,19 +33,29 @@ working directory.
 """
 
 import argparse
+import base64
+import hashlib
 import hmac
+import http.server
 import json
 import os
 import pathlib
+import secrets
+import socket
 import sys
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'proxy'))
 
 import claudefuscator_core as core          # noqa: E402
 import config_merge                         # noqa: E402
-from vault_client import VaultClient         # noqa: E402
+import credentials                          # noqa: E402
+from vault_client import LOOPBACK_HOSTS, USER_AGENT, _OPENER, VaultClient  # noqa: E402
 
 DEFAULT_PORT = 8091                         # 8090 is the proxy
 AUTH_HEADER = 'x-claudefuscator-auth'
@@ -473,6 +483,158 @@ def print_fingerprint():
     return 0
 
 
+def connect(args):
+    """Get a vault credential by having the person approve this agent.
+
+    The alternative was telling them to create one in the web UI and paste
+    it into a terminal, where it lands in a shell history, a scrollback
+    buffer and - this has happened on this project - a chat window.
+
+    The shape, which is PKCE in all but name:
+
+      1. invent a verifier, keep it in this process
+      2. send only its SHA-256 to the browser, with the port to come back to
+      3. the person signs in and approves
+      4. the browser returns a one-time code to loopback
+      5. exchange code + verifier directly with the host over TLS
+
+    Step 4 is the one worth looking at twice. Anything running as this user
+    could watch that redirect, so the code it carries has to be worthless
+    alone - which is exactly what the verifier buys.
+    """
+    raw = load_config(args.config)
+    vault = (raw or {}).get('vault')
+    url = (vault or {}).get('url', '').strip().rstrip('/') if isinstance(vault, dict) else ''
+
+    if not url:
+        print('No vault.url configured, so there is nothing to connect to.\n'
+              'Put the server address in your identifier list:\n'
+              '  { "vault": { "url": "https://ai.example.com" } }', file=sys.stderr)
+        return 2
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != 'https' and parsed.hostname not in LOOPBACK_HOSTS:
+        print(f'Refusing to connect over {parsed.scheme} to {parsed.hostname}: a '
+              'credential would cross the wire in clear.', file=sys.stderr)
+        return 2
+
+    verifier = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode('utf-8')).digest()).rstrip(b'=').decode()
+    state = secrets.token_urlsafe(16)
+
+    received = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            parts = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parts.query)
+
+            if parts.path != '/claudefuscator/connected':
+                self.send_response(404)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+
+            # Compared before the code is touched. Without it, any page the
+            # browser happens to load could drive this listener.
+            if (query.get('state') or [''])[0] != state:
+                received['error'] = 'the browser came back with the wrong state'
+            else:
+                received['code'] = (query.get('code') or [''])[0]
+
+            body = (b'<!doctype html><meta charset="utf-8">'
+                    b'<title>Claudefuscator</title>'
+                    b'<body style="font:14px system-ui;padding:3rem;max-width:34rem">'
+                    b'<h1 style="font-size:1.2rem">Connected</h1>'
+                    b'<p>You can close this tab and go back to the terminal.</p>')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    # Port 0: the OS picks a free one. A fixed port would collide with
+    # whatever else is running and, worse, would let something squat on it
+    # and receive the redirect.
+    server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+    port = server.server_address[1]
+
+    target = (f'{url}/claudefuscator/connect'
+              f'?challenge={urllib.parse.quote(challenge)}'
+              f'&port={port}'
+              f'&state={urllib.parse.quote(state)}'
+              f'&label={urllib.parse.quote(args.label or socket.gethostname())}')
+
+    print('Approve this agent in your browser:\n')
+    print(f'  {target}\n')
+    print('Opening it for you. Waiting up to two minutes.')
+    try:
+        webbrowser.open(target)
+    except Exception:
+        print('(could not open a browser - use the link above)')
+
+    server.timeout = 120
+    server.handle_request()
+    server.server_close()
+
+    if received.get('error'):
+        print(f'Not connected: {received["error"]}', file=sys.stderr)
+        return 1
+    if not received.get('code'):
+        print('Not connected: nothing came back from the browser in time.',
+              file=sys.stderr)
+        return 1
+
+    body = json.dumps({'code': received['code'], 'verifier': verifier}).encode('utf-8')
+    request = urllib.request.Request(
+        url + '/api/vault/connect/exchange', data=body, method='POST',
+        headers={'Content-Type': 'application/json', 'User-Agent': USER_AGENT})
+
+    try:
+        with _OPENER.open(request, timeout=20) as response:
+            issued = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        # Status only. An error body from this endpoint can echo the
+        # request, and the request carries the code and the verifier.
+        print(f'Not connected: the vault answered {e.code}.', file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+        print(f'Not connected: {type(e).__name__}', file=sys.stderr)
+        return 1
+
+    token = issued.get('token')
+    if not token:
+        print('Not connected: the vault returned no credential.', file=sys.stderr)
+        return 1
+
+    try:
+        credentials.store(url, token)
+    except credentials.CredentialError as e:
+        print(f'Connected, but the credential could not be stored: {e}', file=sys.stderr)
+        return 1
+
+    print(f'\nConnected to {url} as "{issued.get("label")}".')
+    print(f'Credential stored: {credentials.protection()}.')
+    if not credentials.WINDOWS:
+        print('NOTE: on this platform it is NOT encrypted at rest - only the '
+              'file permissions protect it.')
+    return 0
+
+
+def disconnect(_args):
+    """Forget the stored credential."""
+    if credentials.clear():
+        print('Forgotten. The credential in the vault still exists - revoke it '
+              'there too if this machine should no longer have one.')
+        return 0
+    print('Nothing stored here.')
+    return 0
+
+
 def enrol_key(args):
     """Store this machine's key in the vault, wrapped under the API token."""
     key, source = resolve_key()
@@ -579,6 +741,16 @@ def main():
     parser.add_argument('--port', type=int, default=int(os.environ.get('CLAUDEFUSCATOR_AGENT_PORT', DEFAULT_PORT)))
     parser.add_argument('--config', help='identifier list; defaults to CLAUDEFUSCATOR_CONFIG')
     parser.add_argument(
+        '--connect', action='store_true',
+        help='get a vault credential by approving this agent in your browser, '
+             'instead of creating one by hand and pasting it')
+    parser.add_argument(
+        '--disconnect', action='store_true',
+        help='forget the stored vault credential on this machine')
+    parser.add_argument(
+        '--label', default=None,
+        help='what to call this agent in the vault (default: this hostname)')
+    parser.add_argument(
         '--enrol-key', action='store_true',
         help="wrap this machine's key under your API token and store it in "
              'the vault, so a browser can collect it once per session. Read '
@@ -604,6 +776,12 @@ def main():
 
     if args.fingerprint:
         return print_fingerprint()
+
+    if args.connect:
+        return connect(args)
+
+    if args.disconnect:
+        return disconnect(args)
 
     if args.enrol_key:
         return enrol_key(args)

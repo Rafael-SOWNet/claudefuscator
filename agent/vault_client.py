@@ -34,6 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import credentials
 import vault_crypto as vc
 
 
@@ -112,11 +113,23 @@ class VaultClient:
                           f'refusing {url}')
 
         token = os.environ.get('CLAUDEFUSCATOR_VAULT_TOKEN', '').strip()
+
         if not token:
-            # Deliberately not read from the config file: that file is
-            # shared, diffed and sometimes pasted. A credential belongs in
-            # the environment.
-            return None, 'no CLAUDEFUSCATOR_VAULT_TOKEN set'
+            # Then whatever `--connect` stored for THIS host. Scoped to the
+            # url inside the store, so a credential issued for one vault is
+            # never presented to another.
+            #
+            # Still deliberately not read from the config file: that file is
+            # shared, diffed and sometimes pasted, which is exactly what a
+            # credential must not be.
+            try:
+                token = credentials.load(url) or ''
+            except credentials.CredentialError as e:
+                return None, str(e)
+
+        if not token:
+            return None, ('not connected - run the agent with --connect, or set '
+                          'CLAUDEFUSCATOR_VAULT_TOKEN')
 
         return cls(url, token, secret, product=raw.get('product')), f'ACTIVE ({url})'
 
