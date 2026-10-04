@@ -243,6 +243,49 @@ def test_it_starts_from_a_config_file(monkeypatch, tmp_path):
     assert status.startswith('ACTIVE') and '2 known' in status
 
 
+# ---- key fingerprint ---------------------------------------------------
+
+def test_the_fingerprint_is_stable_and_key_dependent(capsys, monkeypatch):
+    """Escrow's unanswerable question - is the sealed copy the key in use? -
+    without either party revealing a key to the other."""
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', 'the-key')
+    agent.print_fingerprint()
+    first = capsys.readouterr().out.splitlines()[0]
+
+    agent.print_fingerprint()
+    assert capsys.readouterr().out.splitlines()[0] == first, 'not stable'
+
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', 'the-kez')
+    agent.print_fingerprint()
+    assert capsys.readouterr().out.splitlines()[0] != first, 'one character changed nothing'
+
+
+def test_the_fingerprint_does_not_contain_the_key(capsys, monkeypatch):
+    secret = 'a-distinctive-secret-value'
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', secret)
+    agent.print_fingerprint()
+    out = capsys.readouterr().out
+
+    assert secret not in out
+    for i in range(0, len(secret) - 3):
+        assert secret[i:i + 4] not in out, 'a fragment of the key was printed'
+
+
+def test_the_fingerprint_is_not_the_agent_auth_token(capsys, monkeypatch):
+    """That value authenticates to the agent, so printing it would be
+    printing a credential rather than a checksum."""
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', KEY)
+    agent.print_fingerprint()
+    out = capsys.readouterr().out
+
+    assert core.hmac_hex(KEY, agent.AUTH_LABEL)[:8] not in out
+
+
+def test_no_key_is_refused_rather_than_fingerprinting_nothing(monkeypatch):
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    assert agent.print_fingerprint() == 2
+
+
 # ---- cross-surface ----------------------------------------------------
 
 def test_the_agent_agrees_with_the_committed_vectors():

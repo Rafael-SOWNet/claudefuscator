@@ -357,6 +357,24 @@ CLAUDEFUSCATOR_KEY=... CLAUDEFUSCATOR_CONFIG=... python agent/claudefuscator_age
 There is deliberately **no bulk export**, and no CORS header is sent, so a
 page may send a request but can never read the response.
 
+#### Checking two copies are the same key
+
+```bash
+python agent/claudefuscator_agent.py --fingerprint
+# key fingerprint: 5b5d91b5  (claudefuscator/v1)
+```
+
+Escrow raises a question nobody can answer by looking: is the sealed copy
+the key actually in use? Comparing the keys means both parties revealing
+them to each other, which is how a copy ends up pasted into a chat window.
+
+The fingerprint is an HMAC over a fixed label, truncated. Derived from the
+key, so it differs if one character does; one-way, so it discloses
+nothing; stable, so two people in different rooms can read eight
+characters to each other. It is deliberately **not** the value the agent
+authenticates with — printing that would be printing a credential rather
+than a checksum, and there is a test for the distinction.
+
 #### The shared vault
 
 The agent resolves from the local list, then a plaintext cache at

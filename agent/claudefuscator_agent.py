@@ -338,6 +338,39 @@ def build_store(args):
                    f'config: {source}; vault: {vault_status})')
 
 
+FINGERPRINT_LABEL = 'claudefuscator/fingerprint/v1'
+
+
+def print_fingerprint():
+    """Say which key is configured, without saying what it is.
+
+    Escrow turns on a question nobody can answer by looking: is the sealed
+    copy the same key that is in use? Comparing the secrets themselves
+    means both parties revealing them to each other, which is how a copy
+    gets pasted into a chat window.
+
+    An HMAC over a fixed label, truncated, settles it instead. It is
+    derived from the key, so it differs if a single character does; it is
+    one-way, so it discloses nothing; and it is stable, so two people in
+    different rooms can read eight characters to each other.
+
+    Its own label, not the one /mappings uses: that value authenticates to
+    the agent, so printing it would be printing a credential rather than a
+    checksum.
+    """
+    key = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
+    if not key:
+        print('No CLAUDEFUSCATOR_KEY set; nothing to fingerprint.', file=sys.stderr)
+        return 2
+
+    print(f'key fingerprint: {core.hmac_hex(key, FINGERPRINT_LABEL)[:8]}  '
+          f'({core.TOKEN_VERSION})')
+    print('Same key on another machine prints the same eight characters. '
+          'Different key, different fingerprint - compare these rather than '
+          'the keys themselves.')
+    return 0
+
+
 def publish_identifiers(args):
     """Seal a local file and publish it as the shared identifier list.
 
@@ -406,6 +439,11 @@ def main():
     parser.add_argument('--port', type=int, default=int(os.environ.get('CLAUDEFUSCATOR_AGENT_PORT', DEFAULT_PORT)))
     parser.add_argument('--config', help='identifier list; defaults to CLAUDEFUSCATOR_CONFIG')
     parser.add_argument(
+        '--fingerprint', action='store_true',
+        help='print a short fingerprint of the configured key and exit. Reveals '
+             'nothing about the key; two copies match if and only if their '
+             'fingerprints do.')
+    parser.add_argument(
         '--publish-identifiers', metavar='FILE',
         help='seal FILE and publish it as the shared identifier list, then exit. '
              'Needs the ManageIdentifiers role.')
@@ -418,6 +456,9 @@ def main():
         'CLAUDEFUSCATOR_CACHE', os.path.expanduser('~/.claudefuscator/discovered.json')),
         help='where discovered values persist. Holds real values in plaintext.')
     args = parser.parse_args()
+
+    if args.fingerprint:
+        return print_fingerprint()
 
     if args.publish_identifiers:
         return publish_identifiers(args)
