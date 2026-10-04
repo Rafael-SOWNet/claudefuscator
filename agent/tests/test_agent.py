@@ -396,3 +396,44 @@ def test_an_explicit_config_beats_the_plugin_config(tmp_path, monkeypatch):
     mod = _reload(monkeypatch, _settings(tmp_path, {'config_path': str(other)}))
 
     assert mod.resolve_config_path(str(chosen)) == str(chosen)
+
+
+def test_an_explicit_key_beats_every_other_source(tmp_path, monkeypatch):
+    mod = _reload(monkeypatch, _settings(tmp_path, {'secret_key': 'from-plugin-config'}))
+    monkeypatch.setenv('CLAUDEFUSCATOR_KEY', 'from-environment')
+
+    # --key is for scripts and for getting out of trouble, so it has to
+    # win: a run that silently used a different key than the one named on
+    # the command line would be unusable for exactly those purposes.
+    key, source = mod.resolve_key('from-the-argument')
+    assert key == 'from-the-argument'
+    assert source == 'the --key argument'
+
+
+def test_a_key_piped_in_is_read_from_stdin(tmp_path, monkeypatch):
+    import io as _io
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    mod = _reload(monkeypatch, _settings(tmp_path, {}))
+    monkeypatch.setattr(mod.sys, 'stdin', _io.StringIO('piped-key\n'))
+
+    key, source = mod.resolve_key('-')
+    assert key == 'piped-key'
+    assert source == 'standard input'
+
+
+def test_a_pasted_key_is_stripped(tmp_path, monkeypatch):
+    mod = _reload(monkeypatch, _settings(tmp_path, {}))
+
+    # Paste brings a trailing newline or a stray space with it constantly.
+    # A key differing by one invisible character derives entirely different
+    # tokens and looks completely fine doing it.
+    assert mod.resolve_key('  spaced-key \n')[0] == 'spaced-key'
+
+
+def test_an_empty_pipe_is_not_a_key(tmp_path, monkeypatch):
+    import io as _io
+    monkeypatch.delenv('CLAUDEFUSCATOR_KEY', raising=False)
+    mod = _reload(monkeypatch, _settings(tmp_path, {}))
+    monkeypatch.setattr(mod.sys, 'stdin', _io.StringIO(''))
+
+    assert mod.resolve_key('-') == (None, None)

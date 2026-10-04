@@ -34,6 +34,7 @@ working directory.
 
 import argparse
 import base64
+import getpass
 import hashlib
 import hmac
 import http.server
@@ -310,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_store(args):
-    key, _source = resolve_key()
+    key, _source = resolve_key(getattr(args, 'key', None))
     if not key:
         return None, 'no key set, in the environment or the Claude Code plugin config'
 
@@ -389,12 +390,30 @@ def _claude_plugin_options():
     return candidates[0] if len(candidates) == 1 else {}
 
 
-def resolve_key():
+def resolve_key(explicit=None):
     """The Claudefuscator key, and where it came from.
 
     Returns (key, source). `source` names the place, never the value - it is
     printed, and the key must not be.
     """
+    if explicit:
+        # `-` means stdin: the scriptable path that keeps the key out of
+        # both the shell history and the process command line, where any
+        # other process on the machine can read it.
+        if explicit == '-':
+            piped = sys.stdin.readline().strip()
+            return (piped, 'standard input') if piped else (None, None)
+
+        # Said every time, not once. A key on the command line is in the
+        # shell history and in the process list, where anything running as
+        # this user can read it - and both outlive the command. The person
+        # asked for this path deliberately, so it works; it does not get
+        # to be quiet about what it costs.
+        print('WARNING: --key puts the key in your shell history and in the '
+              'process list. Use "--key -" to pipe it in, or omit it and be '
+              'prompted.', file=sys.stderr)
+        return explicit.strip(), 'the --key argument'
+
     from_env = os.environ.get('CLAUDEFUSCATOR_KEY', '').strip()
     if from_env:
         return from_env, 'CLAUDEFUSCATOR_KEY'
@@ -463,7 +482,7 @@ def fingerprint(key):
     return core.hmac_hex(key, FINGERPRINT_LABEL)[:8]
 
 
-def print_fingerprint():
+def print_fingerprint(args=None):
     """Say which key is configured, without saying what it is.
 
     Escrow turns on a question nobody can answer by looking: is the sealed
@@ -480,7 +499,7 @@ def print_fingerprint():
     the agent, so printing it would be printing a credential rather than a
     checksum.
     """
-    key, source = resolve_key()
+    key, source = resolve_key(getattr(args, 'key', None))
     if not key:
         print(NO_KEY, file=sys.stderr)
         return 2
@@ -644,7 +663,7 @@ def print_status(args):
 
     Prints sources and fingerprints only. Never a key, never a credential.
     """
-    key, source = resolve_key()
+    key, source = resolve_key(args.key)
     config_path = resolve_config_path(args.config)
 
     print('Key          : ', end='')
@@ -713,11 +732,63 @@ def disconnect(_args):
     return 0
 
 
+def prompt_for_key():
+    """Ask for the key at the terminal, without echoing it.
+
+    Better than telling somebody to export it first, which is what this
+    replaced. An exported key is in the shell history, in the process
+    command line where other processes can read it, and in the
+    environment of everything that shell then starts. A prompt is none of
+    those: it is read straight into this process and goes no further.
+
+    Paste tends to bring a trailing newline or a stray space with it, so
+    the value is stripped - a key differing by one invisible character
+    derives entirely different tokens and looks completely fine.
+    """
+    # Checked before prompting, because getpass reads the terminal rather
+    # than stdin: with no terminal it does not fail, it WAITS - forever, in
+    # a script or a CI job, with no output saying why. A clear refusal is
+    # the only acceptable behaviour there.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print('No terminal to ask on. Run this from an interactive shell, or '
+              'set CLAUDEFUSCATOR_KEY for this one command.', file=sys.stderr)
+        return None
+
+    print('Paste the Claudefuscator key. It will not be shown.')
+    print('(This is the shared key that derives tokens - NOT your vault '
+          'credential, which is already stored.)')
+    try:
+        typed = getpass.getpass('Key: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        return None
+    except Exception as e:
+        # getpass falls back to echoing on some terminals and raises on
+        # others. Either way, say so rather than letting a key appear on
+        # screen unannounced.
+        print(f'Could not read without echoing ({type(e).__name__}). Refusing '
+              'to ask for a key in the clear.', file=sys.stderr)
+        return None
+
+    if not typed:
+        print('Nothing entered.', file=sys.stderr)
+        return None
+
+    return typed
+
+
 def enrol_key(args):
     """Store this machine's key in the vault, wrapped under the API token."""
-    key, source = resolve_key()
+    key, source = resolve_key(args.key)
+
     if not key:
-        print(NO_KEY, file=sys.stderr)
+        # Asked for rather than refused. This is the one moment in the
+        # whole design where a person has to handle the key at all, and
+        # after it nothing on any machine needs it configured again.
+        key = prompt_for_key()
+        source = 'what you just pasted'
+
+    if not key:
         return 2
 
     raw = load_config(args.config)
@@ -726,9 +797,33 @@ def enrol_key(args):
         print(f'No vault to enrol with: {status}', file=sys.stderr)
         return 2
 
+    # The confusion this catches: two different secrets are in play - the
+    # shared Claudefuscator key, which derives tokens, and the per-person
+    # API credential, which authenticates to the vault. Setting the second
+    # where the first belongs is an easy mistake and a silent one. It would
+    # scrub perfectly happily and derive tokens nobody else on earth
+    # derives, and the first sign would be colleagues unable to resolve
+    # anything you sent them.
+    if key == client._token:
+        print('That is your vault credential, not the Claudefuscator key.\n'
+              '\n'
+              'They are different secrets. The key derives tokens and is the '
+              'same for everyone who must resolve each other\'s; the '
+              'credential authenticates you to the vault and is yours alone. '
+              'Enrolling the credential as the key would scrub happily and '
+              'produce tokens no colleague can resolve.',
+              file=sys.stderr)
+        return 2
+
     # Said before the network call, so a run that cannot work is diagnosable
-    # from its own output. The source, never the key.
-    print(f'Key from {source}; vault {status}.')
+    # from its own output. The source and a fingerprint, never the key.
+    #
+    # The fingerprint is here rather than only afterwards because this is
+    # the moment a mistyped or half-pasted key can still be caught. Once
+    # it is in the vault, every browser that collects it scrubs with it,
+    # and the symptom is colleagues unable to resolve anything.
+    print(f'Key from {source}, fingerprint {fingerprint(key)}.')
+    print(f'Vault {status}.')
 
     ok, err = client.enrol_key()
     if not ok:
@@ -759,7 +854,7 @@ def publish_identifiers(args):
     it stores. The agent is the component that holds the key, so the agent
     is what publishes.
     """
-    key, source = resolve_key()
+    key, source = resolve_key(args.key)
     if not key:
         print(NO_KEY, file=sys.stderr)
         return 2
@@ -819,6 +914,12 @@ def main():
     parser.add_argument('--port', type=int, default=int(os.environ.get('CLAUDEFUSCATOR_AGENT_PORT', DEFAULT_PORT)))
     parser.add_argument('--config', help='identifier list; defaults to CLAUDEFUSCATOR_CONFIG')
     parser.add_argument(
+        '--key', default=None,
+        help='the Claudefuscator key, for scripts and for getting out of '
+             'trouble. Use "-" to read it from standard input, which keeps it '
+             'out of your shell history and out of the process command line; '
+             'passing the value literally puts it in both.')
+    parser.add_argument(
         '--status', action='store_true',
         help='what this machine is configured with, and whether the enrolled '
              'key matches it. Prints sources and fingerprints, never secrets.')
@@ -857,7 +958,7 @@ def main():
     args = parser.parse_args()
 
     if args.fingerprint:
-        return print_fingerprint()
+        return print_fingerprint(args)
 
     if args.status:
         return print_status(args)
