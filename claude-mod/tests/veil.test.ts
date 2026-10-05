@@ -298,3 +298,74 @@ test('a configured key is not displaced by the agent',
     const again = await $.prompt.submit({ text: `again: ${REAL_HOST}` });
     expect(again.text).toBe(`again: ${withLocal.text}`);
   });
+
+/*
+ * Credentials. Invented specimens: right prefix and length, random
+ * body, nothing that authenticates anywhere.
+ */
+const FAKE_PAT = 'ghp_' + 'A'.repeat(36);
+
+test('a credential in the prompt is reported and still sent',
+  { options: OPTIONS }, async ($, on) => {
+    const logs: string[] = [];
+    on('ui.log', async (_$: any, e: any) => {
+      logs.push(String(e?.message ?? JSON.stringify(e)));
+      return { value: undefined };
+    });
+    on('fs.read', async (_$: any, e: any) =>
+      (String(e.path).endsWith('test-config.json')
+        ? { value: CONFIG } : { deny: 'not found' }));
+    on('prompt.submit', async (_$: any, e: any) => e);
+
+    const result = await $.prompt.submit({ text: 'deploy with ' + FAKE_PAT });
+
+    // Warned, not tokenized. A token round-trips, and a credential
+    // coming back is a new way to spill it.
+    expect(logs.join(' ')).toContain('github-token');
+    expect(result.text).toContain(FAKE_PAT);
+  });
+
+test('the warning never quotes the credential',
+  { options: OPTIONS }, async ($, on) => {
+    const logs: string[] = [];
+    on('ui.log', async (_$: any, e: any) => {
+      logs.push(String(e?.message ?? JSON.stringify(e)));
+      return { value: undefined };
+    });
+    on('fs.read', async (_$: any, e: any) =>
+      (String(e.path).endsWith('test-config.json')
+        ? { value: CONFIG } : { deny: 'not found' }));
+    on('prompt.submit', async (_$: any, e: any) => e);
+
+    await $.prompt.submit({ text: 'deploy with ' + FAKE_PAT });
+
+    // Warnings reach logs and scrollback. One that quoted the secret
+    // would spread it further than staying quiet would have.
+    expect(logs.join(' ')).not.toContain(FAKE_PAT);
+  });
+
+test('secretPolicy block stops the prompt', { options: OPTIONS },
+  async ($, on) => {
+    const blocking = JSON.stringify({ ...BASE, secretPolicy: 'block' });
+    on('ui.log', async () => ({ value: undefined }));
+    on('fs.read', async (_$: any, e: any) =>
+      (String(e.path).endsWith('test-config.json')
+        ? { value: blocking } : { deny: 'not found' }));
+
+    let reached = false;
+    on('prompt.submit', async (_$: any, e: any) => { reached = true; return e; });
+
+    await $.prompt.submit({ text: 'deploy with ' + FAKE_PAT });
+
+    // Nothing beneath the hook ran, so nothing was sent.
+    expect(reached).toBe(false);
+  });
+
+test('a prompt with no credential is untouched by the policy',
+  { options: OPTIONS }, async ($, on) => {
+    serveConfig(on);
+    on('prompt.submit', async (_$: any, e: any) => e);
+
+    const result = await $.prompt.submit({ text: 'what time is it' });
+    expect(result.text).toBe('what time is it');
+  });

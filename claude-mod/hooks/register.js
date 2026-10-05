@@ -38,6 +38,10 @@ const AGENT_TIMEOUT_MS = 2000;
 
 /* Shared by every hook in this module, which is how a mod keeps state. */
 let vault = null;
+/* 'warn' (default) or 'block'. Warn, not block, because a matcher that
+ * stops work is one people route around, and this one is new enough
+ * that its false-positive rate is unmeasured here. */
+let secretPolicy = 'warn';
 let status = 'INACTIVE (not initialised)';
 let warnings = [];
 let scrubbed = 0;
@@ -249,6 +253,9 @@ async function load($) {
     }
   }
 
+  secretPolicy = (rawConfig && rawConfig.config
+    && rawConfig.config.secretPolicy === 'block') ? 'block' : 'warn';
+
   const packs = new Map();
   for (const ref of (rawConfig && rawConfig.config.packs) || []) {
     let text = null;
@@ -347,6 +354,34 @@ export function register(on, pluginOptions) {
   /* The prompt you typed. This is the gap a settings hook cannot close. */
   on('prompt.submit', async ($, e, next) => {
     await ensureLoaded($);
+
+    /* Credentials are checked BEFORE scrubbing and independently of it:
+     * a prompt with no identifiers still gets this, and a machine with
+     * no key or no list still gets it, because a pasted secret is a
+     * problem whatever else is configured.
+     *
+     * Reported, never substituted. See the note on SECRET_PATTERNS -
+     * a token round-trips, and a credential coming back is a new way to
+     * spill it rather than a way to protect it. */
+    if (typeof e.text === 'string') {
+      const secrets = core.findSecrets(e.text);
+      if (secrets.length) {
+        const what = core.describeSecrets(secrets);
+        if (secretPolicy === 'block') {
+          $.ui.log(`Claudefuscator BLOCKED your prompt: it contains ${what}. `
+            + 'Nothing was sent. Remove it, or set "secretPolicy": "warn" to '
+            + 'send anyway.');
+          /* Returning without next() is what stops it. The prompt is not
+           * rewritten, because a credential silently removed from what
+           * you typed is its own surprise. */
+          return { text: '' };
+        }
+        $.ui.log(`Claudefuscator WARNING: your prompt contains ${what}, and it `
+          + 'is being sent. Credentials are not tokenized - revoke it if this '
+          + 'was not deliberate. Set "secretPolicy": "block" to stop instead.');
+      }
+    }
+
     if (!vault || typeof e.text !== 'string') return next(e);
     const r = await scrubText(e.text, vault, core);
     if (!r.hits.length) return next(e);

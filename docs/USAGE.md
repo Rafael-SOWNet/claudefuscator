@@ -222,6 +222,39 @@ A minimal `claudefuscator.local.json`:
 > does, and it is not a route to pasting a proprietary module — see the scope
 > boundary in [CLAUDE.md](../CLAUDE.md).
 
+### Credentials are reported, not hidden
+
+Claudefuscator recognises credential shapes - GitHub, GitLab, Anthropic,
+OpenAI, AWS, Slack, Google, npm, HuggingFace, DigitalOcean, SendGrid,
+PyPI, private-key blocks and JWTs - and **warns rather than tokenizing
+them**:
+
+```json
+"secretPolicy": "warn"     // default: say so loudly, send anyway
+"secretPolicy": "block"    // refuse to send the prompt at all
+```
+
+Three reasons it does not tokenize them, since that is the obvious thing
+to expect:
+
+- **A token round-trips.** That is the point for a name and a disaster
+  for a credential: restore would put the live secret back into tool
+  calls that write to disk, and into the browser. Hiding it on one hop
+  while adding two new places it lands is not a trade worth making.
+- **Handling them invites pasting them.** "Secrets are covered"
+  encourages sending a config with live keys and trusting the matcher.
+  Miss one prefix and it goes up in the clear - silently, and far more
+  expensively than a missed name.
+- **Stable tokens leak equality**, which is fine for a hostname and not
+  for a secret.
+
+The warning names the family and never quotes the value, because
+warnings end up in logs and scrollback.
+
+`warn` is the default deliberately: a matcher that stops work is one
+people route around, and this one is new enough that its false-positive
+rate here is unmeasured.
+
 ### The allow-list matters more than it looks
 
 Org vocabulary collides with ordinary language constantly. *Kern*, *Boring*,

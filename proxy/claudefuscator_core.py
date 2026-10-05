@@ -411,3 +411,74 @@ def map_strings(value, fn):
 
 def build_vault(secret, config):
     return Vault(secret, config)
+
+
+# ---- credentials -----------------------------------------------------
+#
+# PARITY with findSecrets/describeSecrets in the JS core.
+#
+# Found and REPORTED, never tokenized. A token round-trips, which is the
+# point for a name and a disaster for a credential: restore would put the
+# live secret back into tool calls that write to disk. Handling them also
+# invites pasting them, and a missed prefix then sends the secret up in
+# the clear - silently, and far more expensively than a missed name.
+#
+# No finding ever carries the value. Findings reach logs and status
+# lines, so the thing found must not travel with them.
+SECRET_PATTERNS = [
+    # Longest and most specific first: sk-ant- would otherwise be
+    # reported as the generic sk- family, naming the wrong vendor.
+    ('anthropic-api-key', re.compile(r'\bsk-ant-[A-Za-z0-9_-]{20,}')),
+    ('openai-api-key', re.compile(r'\bsk-[A-Za-z0-9]{32,}')),
+    ('github-pat', re.compile(r'\bgithub_pat_[A-Za-z0-9_]{22,}')),
+    ('github-token', re.compile(r'\bgh[pousr]_[A-Za-z0-9]{36,}')),
+    ('gitlab-pat', re.compile(r'\bglpat-[A-Za-z0-9_-]{20,}')),
+    ('slack-token', re.compile(r'\bxox[baprs]-[A-Za-z0-9-]{10,}')),
+    ('aws-access-key-id',
+     re.compile(r'\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b')),
+    ('google-api-key', re.compile(r'\bAIza[0-9A-Za-z_-]{35}\b')),
+    ('npm-token', re.compile(r'\bnpm_[A-Za-z0-9]{36}\b')),
+    ('huggingface-token', re.compile(r'\bhf_[A-Za-z0-9]{34,}')),
+    ('digitalocean-token', re.compile(r'\bdop_v1_[a-f0-9]{64}\b')),
+    ('sendgrid-key', re.compile(r'\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b')),
+    ('pypi-token', re.compile(r'\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}')),
+    ('private-key-block', re.compile(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----')),
+    ('json-web-token',
+     re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}')),
+]
+
+
+def find_secrets(text):
+    """Every credential-shaped thing in `text`.
+
+    Returns [{'name', 'index', 'length'}] - the family, where it starts,
+    and how long it is. Never the value.
+    """
+    subject = text if isinstance(text, str) else ''
+    if not subject:
+        return []
+
+    found = []
+    claimed = []
+
+    for name, pattern in SECRET_PATTERNS:
+        for m in pattern.finditer(subject):
+            if not m.group(0):
+                continue
+            start, end = m.start(), m.end()
+            # One finding per span, or a PAT is counted by two families
+            # and a count of findings stops meaning a count of secrets.
+            if any(start < c_end and end > c_start for c_start, c_end in claimed):
+                continue
+            claimed.append((start, end))
+            found.append({'name': name, 'index': start, 'length': end - start})
+
+    return sorted(found, key=lambda f: f['index'])
+
+
+def describe_secrets(findings):
+    """A one-line summary: which families, how many of each."""
+    counts = {}
+    for f in findings or []:
+        counts[f['name']] = counts.get(f['name'], 0) + 1
+    return ', '.join(f'{n} x{c}' if c > 1 else n for n, c in counts.items())

@@ -619,8 +619,101 @@ async function mapStrings(value, fn) {
   return value;
 }
 
+/* ---- credentials -----------------------------------------------------
+ *
+ * These are found and REPORTED. They are deliberately not tokenized, and
+ * the reasoning belongs next to the code because the obvious next step is
+ * to pass them through scrub() like everything else.
+ *
+ *  - A token round-trips. That is the point for a name and a disaster for
+ *    a credential: restore would put the live secret back into tool calls
+ *    that write to disk, and into the browser DOM. Hiding it on one hop
+ *    while adding two new places it lands is not a trade worth making.
+ *
+ *  - Handling credentials invites pasting them. "Secrets are covered"
+ *    encourages sending a config with live keys and trusting this list.
+ *    Miss one prefix - a new vendor, a wrapped line, a base64 blob - and
+ *    the secret goes up in the clear. A missed name is embarrassing; a
+ *    missed credential is an incident, and both fail silently.
+ *
+ *  - Stable tokens leak equality by construction, which is acceptable for
+ *    a hostname and not for a secret.
+ *
+ * So: no value is ever returned, only a family name and a position. Even
+ * the finding must not carry the thing it found, because findings end up
+ * in logs and in status lines.
+ */
+const SECRET_PATTERNS = [
+  /* Longest and most specific first: sk-ant- would otherwise be reported
+   * as the generic sk- family and named the wrong vendor. */
+  { name: 'anthropic-api-key', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+  { name: 'openai-api-key', re: /\bsk-[A-Za-z0-9]{32,}/g },
+  { name: 'github-pat', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+  { name: 'github-token', re: /\bgh[pousr]_[A-Za-z0-9]{36,}/g },
+  { name: 'gitlab-pat', re: /\bglpat-[A-Za-z0-9_-]{20,}/g },
+  { name: 'slack-token', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+  { name: 'aws-access-key-id', re: /\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b/g },
+  { name: 'google-api-key', re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  { name: 'npm-token', re: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  { name: 'huggingface-token', re: /\bhf_[A-Za-z0-9]{34,}/g },
+  { name: 'digitalocean-token', re: /\bdop_v1_[a-f0-9]{64}\b/g },
+  { name: 'sendgrid-key', re: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g },
+  { name: 'pypi-token', re: /\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}/g },
+  { name: 'private-key-block', re: /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/g },
+  { name: 'json-web-token', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+];
+
+/* Every credential-shaped thing in `text`.
+ *
+ * Returns `[{ name, index, length }]` - the family, where it starts, and
+ * how long it is. Never the value. A caller that wants to point at it can
+ * use the offsets; a caller that wants to log it cannot.
+ */
+function findSecrets(text) {
+  const subject = typeof text === 'string' ? text : '';
+  if (!subject) return [];
+
+  const found = [];
+  const claimed = [];
+
+  for (const pattern of SECRET_PATTERNS) {
+    pattern.re.lastIndex = 0;
+    let m;
+    while ((m = pattern.re.exec(subject)) !== null) {
+      if (!m[0]) { pattern.re.lastIndex++; continue; }
+
+      /* One finding per span. Without this a GitHub PAT is reported
+       * twice, by its own family and by a looser one, and a count of
+       * findings stops meaning a count of secrets. */
+      const start = m.index;
+      const end = start + m[0].length;
+      if (claimed.some((c) => start < c.end && end > c.start)) continue;
+
+      claimed.push({ start: start, end: end });
+      found.push({ name: pattern.name, index: start, length: m[0].length });
+    }
+  }
+
+  return found.sort((a, b) => a.index - b.index);
+}
+
+/* A one-line summary for a human: which families, how many of each.
+ * Deliberately the only thing meant for display. */
+function describeSecrets(findings) {
+  const counts = new Map();
+  for (const f of findings || []) {
+    counts.set(f.name, (counts.get(f.name) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([name, n]) => (n > 1 ? `${name} x${n}` : name))
+    .join(', ');
+}
+
 const ClaudefuscatorCore = {
   TOKEN_VERSION: TOKEN_VERSION,
+  SECRET_PATTERNS: SECRET_PATTERNS,
+  findSecrets: findSecrets,
+  describeSecrets: describeSecrets,
   DEFAULT_TOKEN_LENGTH: DEFAULT_TOKEN_LENGTH,
   normalise: normalise,
   escapeRegex: escapeRegex,
