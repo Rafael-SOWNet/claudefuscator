@@ -46,6 +46,10 @@ let secretPolicy = 'warn';
  * status line, because a warning logged once at load scrolls away and
  * this state lasts the whole session. */
 let keyMismatch = false;
+/* Where this session's key came from. Named in the status line so the
+ * question "which key is the mod using" has an answer that does not
+ * require reading the source. */
+let keySource = 'unknown';
 let status = 'INACTIVE (not initialised)';
 let warnings = [];
 let scrubbed = 0;
@@ -200,9 +204,14 @@ async function collectFromAgent($, homeDir) {
 }
 
 async function load($) {
+  keyMismatch = false;
+  keySource = 'unknown';
+
   let key = (options && options.secret_key) || null;
+  keySource = key ? 'plugin config secret_key' : 'unknown';
   if (!key) {
     try { key = await $.env.get('CLAUDEFUSCATOR_KEY'); } catch (_) { key = null; }
+    if (key) keySource = 'CLAUDEFUSCATOR_KEY in the environment';
   }
 
   /* For ~ in project paths. Each name is spelled out literally because
@@ -266,14 +275,13 @@ async function load($) {
           + 'enrolled key, or enrol this one.');
       }
 
-      if (!key) key = collected.key;
+      if (!key) { key = collected.key; keySource = 'the local agent'; }
       if (!rawConfig && collected.config) {
         rawConfig = { config: collected.config, source: 'the local agent' };
       }
     }
   }
 
-  keyMismatch = false;
   secretPolicy = (rawConfig && rawConfig.config
     && rawConfig.config.secretPolicy === 'block') ? 'block' : 'warn';
 
@@ -339,6 +347,24 @@ async function load($) {
      * own is exactly the reassurance that made this take an afternoon
      * to find. */
     if (keyMismatch) status += ' | KEY MISMATCH: the agent holds a different key';
+
+    /* Which key, and where it came from.
+     *
+     * Eight characters of an HMAC over a fixed label: derived from the
+     * key so it changes if one character does, one-way so it discloses
+     * nothing, and stable so it can be read aloud. The agent prints the
+     * same eight for the same key.
+     *
+     * Here because "ACTIVE" told us nothing for an entire afternoon
+     * while the mod and the agent quietly used different keys. The
+     * status line is where somebody looks first, so it should answer
+     * the first question: WHICH key is this, and who gave it to me. */
+    try {
+      const fp = (await core.hmacHex(key, 'claudefuscator/fingerprint/v1')).slice(0, 8);
+      status += ` | key: ${fp} (${keySource})`;
+    } catch (_) {
+      status += ' | key: fingerprint unavailable';
+    }
   }
 
   /* Report here rather than only from session.start, which does not fire
