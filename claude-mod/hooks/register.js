@@ -42,6 +42,10 @@ let vault = null;
  * stops work is one people route around, and this one is new enough
  * that its false-positive rate is unmeasured here. */
 let secretPolicy = 'warn';
+/* True when this mod's key and the agent's disagree. Carried into the
+ * status line, because a warning logged once at load scrolls away and
+ * this state lasts the whole session. */
+let keyMismatch = false;
 let status = 'INACTIVE (not initialised)';
 let warnings = [];
 let scrubbed = 0;
@@ -246,6 +250,22 @@ async function load($) {
   if (!key || !rawConfig) {
     const collected = await collectFromAgent($, homeDir);
     if (collected) {
+      /* Two keys is the worst state this tool has, and until now it was
+       * invisible. Everything keeps working: the mod scrubs, the status
+       * line says ACTIVE, and the only symptoms are tokens the agent
+       * cannot resolve and a 403 in a log nobody reads. Colleagues then
+       * see red marks and conclude the vault lost their data.
+       *
+       * The two values are both in hand right here, so say it. */
+      if (key && collected.key && key !== collected.key) {
+        keyMismatch = true;
+        $.ui.log('Claudefuscator: the key configured here is NOT the one the '
+          + 'local agent holds. Tokens made here cannot be resolved by the '
+          + 'agent or by the browser, and discovered values will be refused. '
+          + 'Unset CLAUDEFUSCATOR_KEY (or clear secret_key) to use the '
+          + 'enrolled key, or enrol this one.');
+      }
+
       if (!key) key = collected.key;
       if (!rawConfig && collected.config) {
         rawConfig = { config: collected.config, source: 'the local agent' };
@@ -253,6 +273,7 @@ async function load($) {
     }
   }
 
+  keyMismatch = false;
   secretPolicy = (rawConfig && rawConfig.config
     && rawConfig.config.secretPolicy === 'block') ? 'block' : 'warn';
 
@@ -312,6 +333,12 @@ async function load($) {
     status += agent.enabled
       ? ` | agent: ${agent.url}`
       : ` | agent: off (${agent.reason})`;
+
+    /* In the status line as well as the one-off warning. The warning
+     * scrolls away; this state lasts the session, and "ACTIVE" on its
+     * own is exactly the reassurance that made this take an afternoon
+     * to find. */
+    if (keyMismatch) status += ' | KEY MISMATCH: the agent holds a different key';
   }
 
   /* Report here rather than only from session.start, which does not fire

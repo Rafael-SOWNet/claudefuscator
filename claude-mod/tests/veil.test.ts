@@ -369,3 +369,38 @@ test('a prompt with no credential is untouched by the policy',
     const result = await $.prompt.submit({ text: 'what time is it' });
     expect(result.text).toBe('what time is it');
   });
+
+test('a key that disagrees with the agent is reported, not hidden',
+  { options: { secret_key: 'a-key-of-this-machines-own' } }, async ($, on) => {
+    const logs: string[] = [];
+    on('ui.log', async (_$: any, e: any) => {
+      logs.push(String(e?.message ?? JSON.stringify(e)));
+      return { value: undefined };
+    });
+    on('env.get', async (_$: any, e: any) =>
+      (e.name === 'HOME' ? { value: '/home/tester' } : { value: undefined }));
+    on('fs.read', async (_$: any, e: any) =>
+      (String(e.path).replace(/[\\]/g, '/').endsWith('.claudefuscator/agent.json')
+        ? { value: JSON.stringify({ port: 8099, token: 'tok' }) }
+        : { deny: 'not found' }));
+    on('clock.sleep', async () => await new Promise(() => {}));
+    on('http.fetch', async () => ({
+      value: {
+        ok: true, status: 200, headers: {},
+        // The agent holds a DIFFERENT key.
+        text: JSON.stringify({ key: 'the-agents-enrolled-key', config: BASE }),
+      },
+    }));
+    on('prompt.submit', async (_$: any, e: any) => e);
+
+    await $.prompt.submit({ text: 'anything' });
+
+    /* Two keys is the worst state this tool has and used to be silent:
+     * the mod scrubs, the status says ACTIVE, and the only symptoms are
+     * tokens nobody can resolve and a 403 in a log nobody reads. */
+    const said = logs.join(' ');
+    expect(said).toContain('NOT the one the local agent holds');
+    // And never quotes either key.
+    expect(said).not.toContain('a-key-of-this-machines-own');
+    expect(said).not.toContain('the-agents-enrolled-key');
+  });
