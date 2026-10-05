@@ -222,6 +222,24 @@ class Handler(BaseHTTPRequestHandler):
     bootstrap_token = None
     bootstrap_key = None
     bootstrap_config = None
+    bootstrap_config_path = None
+
+    @staticmethod
+    def current_config():
+        """The identifier list as it is on disk RIGHT NOW.
+
+        Not the snapshot taken at startup. The agent is a long-running
+        service and the list is a file people edit; serving the version
+        from whenever the machine last booted meant an edit silently
+        never reached the mod, which went on scrubbing with the old list
+        and said nothing was wrong.
+
+        A few kilobytes read once per mod load. The key stays memoised -
+        that one costs a network round trip and does not change under
+        you the way a local file does.
+        """
+        fresh = load_config(Handler.bootstrap_config_path)
+        return fresh if fresh else Handler.bootstrap_config
 
     # When the pairing window closes, as a monotonic deadline. None means
     # shut. Opened only by someone who can read the handshake file, and
@@ -328,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
 
             self._json(200, {
                 'key': Handler.bootstrap_key,
-                'config': Handler.bootstrap_config,
+                'config': Handler.current_config(),
                 'tokenVersion': core.TOKEN_VERSION,
             })
             return
@@ -379,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._json(200, {
             'key': Handler.bootstrap_key,
-            'config': Handler.bootstrap_config,
+            'config': Handler.current_config(),
             'tokenVersion': core.TOKEN_VERSION,
         })
 
@@ -1290,6 +1308,7 @@ def main():
     # What the mod will collect, so it needs nothing configured itself.
     key, key_source = resolve_key(args.key)
     Handler.bootstrap_key = key
+    Handler.bootstrap_config_path = args.config
     Handler.bootstrap_config = load_config(args.config)
     Handler.bootstrap_token = write_handshake(args.port)
 
