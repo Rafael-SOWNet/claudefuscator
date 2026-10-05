@@ -266,7 +266,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorised(self):
         presented = self.headers.get(AUTH_HEADER) or ''
-        return hmac.compare_digest(presented, Handler.store.auth_token())
+        expected = Handler.store.auth_token()
+
+        if hmac.compare_digest(presented, expected):
+            return True
+
+        # Says WHICH failure, because the two need different fixes and a
+        # bare 403 sent a whole afternoon after the wrong one. "Missing"
+        # means a caller that never sent the header; "mismatched" means a
+        # caller holding a different key.
+        #
+        # Neither value is logged. Only its length, which is enough to
+        # tell a truncated header from a wrong one and discloses nothing:
+        # these are HMAC prefixes, not secrets, but the key they prove is.
+        why = ('no ' + AUTH_HEADER if not presented
+               else f'{AUTH_HEADER} mismatched (presented {len(presented)} '
+                    f'chars, expected {len(expected)}) - the caller holds a '
+                    f'different key')
+        sys.stderr.write('refused: ' + why + '\n')
+        return False
 
     def _read_json(self):
         try:
