@@ -77,6 +77,19 @@ the key does not change, so nothing already tokenized breaks.
 and `CLAUDEFUSCATOR_CONFIG`, paste the same key and list into the extension,
 done. Everything in sections 2–5 applies as written.
 
+> **Moving from local to central later? Set `secret_key` to `-`.**
+>
+> A sensitive plugin field cannot be emptied through `/plugin`: a blank
+> box means *unchanged*, and the stored value lives in Claude Code's
+> credentials file rather than in `settings.json`. So `-` is how you tell
+> the mod to ignore it and use the key the agent collected instead.
+>
+> Without it you keep scrubbing with a key the agent does not have. That
+> fails in the quiet direction — the mod reports ACTIVE, tokens are
+> produced, and nothing you send resolves for anyone else. The mod says
+> `key: <fingerprint> (<where it came from>)` in its status line so you
+> can see which key is in force.
+
 **Central vault mode** adds a server so the list is governed in one place
 and browsers stop asking people to retype the key.
 

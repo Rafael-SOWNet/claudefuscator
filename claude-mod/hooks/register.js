@@ -50,6 +50,9 @@ let keyMismatch = false;
  * question "which key is the mod using" has an answer that does not
  * require reading the source. */
 let keySource = 'unknown';
+/* True when secret_key is set but deliberately disabled. Reported, so
+ * that "ignored" never looks the same as "never configured". */
+let disabledSecretKey = false;
 let status = 'INACTIVE (not initialised)';
 let warnings = [];
 let scrubbed = 0;
@@ -206,8 +209,28 @@ async function collectFromAgent($, homeDir) {
 async function load($) {
   keyMismatch = false;
   keySource = 'unknown';
+  disabledSecretKey = false;
 
-  let key = (options && options.secret_key) || null;
+  /* `-` means "ignore this field", and it exists because there is no
+   * other way out of it.
+   *
+   * secret_key is a sensitive userConfig field, so the plugin UI stores
+   * it in Claude Code's credentials file and offers no way to empty it:
+   * leaving the box blank means UNCHANGED, not cleared. Anyone who sets
+   * a key and later moves to central mode is then stuck with it - and
+   * stuck silently, because the mod goes on scrubbing with a key the
+   * agent does not have, and nothing resolves for anybody else.
+   *
+   * Finding that out cost an afternoon and ended with editing a
+   * credentials file by hand, which is not something to ask of anyone.
+   * One typed character undoes it instead.
+   */
+  const configured = (options && options.secret_key) || null;
+  const disabled = typeof configured === 'string'
+    && ['-', 'none', 'agent'].includes(configured.trim().toLowerCase());
+
+  disabledSecretKey = disabled;
+  let key = disabled ? null : configured;
   keySource = key ? 'plugin config secret_key' : 'unknown';
   if (!key) {
     try { key = await $.env.get('CLAUDEFUSCATOR_KEY'); } catch (_) { key = null; }
@@ -362,6 +385,9 @@ async function load($) {
     try {
       const fp = (await core.hmacHex(key, 'claudefuscator/fingerprint/v1')).slice(0, 8);
       status += ` | key: ${fp} (${keySource})`;
+      if (disabledSecretKey) {
+        status += ' | secret_key ignored by request';
+      }
     } catch (_) {
       status += ' | key: fingerprint unavailable';
     }

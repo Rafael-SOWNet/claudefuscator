@@ -1,7 +1,7 @@
 {
   "name": "claudefuscator-mod",
   "displayName": "Claudefuscator (mod)",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Replaces configured incidental identifiers with stable tokens before they reach Anthropic, and restores them on screen. Covers the typed prompt, system prompt and project instructions, which settings hooks cannot reach.",
   "author": {
     "name": "Rafael Vuijk"
@@ -16,7 +16,7 @@
     "secret_key": {
       "type": "string",
       "title": "Claudefuscator key",
-      "description": "Shared secret used to derive tokens. Enter the SAME value in the Chrome extension options. Stored in your OS credential store, never written to settings.json, never sent anywhere. Deliberately NOT required: without it the mod falls back to the CLAUDEFUSCATOR_KEY environment variable, which is the only way to configure it in `claude -p`, CI and the Agent SDK, where nothing can prompt. With neither, the mod is inert and says so.",
+      "description": "Shared secret used to derive tokens. Enter the SAME value in the Chrome extension options. Stored in your OS credential store, never written to settings.json, never sent anywhere. Deliberately NOT required: without it the mod falls back to the CLAUDEFUSCATOR_KEY environment variable, which is the only way to configure it in `claude -p`, CI and the Agent SDK, where nothing can prompt. With neither, the mod is inert and says so. Set this to \"-\" to ignore it and take the key from the local agent instead: a sensitive field cannot be emptied here, because leaving the box blank means unchanged.",
       "sensitive": true
     },
     "config_path": {

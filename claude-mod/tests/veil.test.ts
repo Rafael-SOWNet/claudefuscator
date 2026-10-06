@@ -17,6 +17,12 @@ import { test, expect } from 'claude-code/testing';
 const KEY = 'mod-plugin-test-key';
 const OPTIONS = { secret_key: KEY, config_path: 'test-config.json' };
 
+/* The engine hands back a platform path, so a check written only with
+ * "/" silently never fires on Windows and the test reads as "the mod
+ * did not ask". Written once, here, because getting the escaping wrong
+ * inline has broken this file more than once. */
+const normalisePath = (p: string) => p.split(String.fromCharCode(92)).join('/');
+
 const REAL_HOST = 'build-01.corp.example';
 const REAL_PERSON = 'Jane Example';
 
@@ -380,7 +386,7 @@ test('a key that disagrees with the agent is reported, not hidden',
     on('env.get', async (_$: any, e: any) =>
       (e.name === 'HOME' ? { value: '/home/tester' } : { value: undefined }));
     on('fs.read', async (_$: any, e: any) =>
-      (String(e.path).replace(/[\\]/g, '/').endsWith('.claudefuscator/agent.json')
+      (normalisePath(String(e.path)).endsWith('.claudefuscator/agent.json')
         ? { value: JSON.stringify({ port: 8099, token: 'tok' }) }
         : { deny: 'not found' }));
     on('clock.sleep', async () => await new Promise(() => {}));
@@ -403,4 +409,42 @@ test('a key that disagrees with the agent is reported, not hidden',
     // And never quotes either key.
     expect(said).not.toContain('a-key-of-this-machines-own');
     expect(said).not.toContain('the-agents-enrolled-key');
+  });
+
+test('secret_key set to "-" falls through to the agent',
+  { options: { secret_key: '-' } }, async ($, on) => {
+    on('ui.log', async () => ({ value: undefined }));
+    on('env.get', async (_$: any, e: any) =>
+      (e.name === 'HOME' ? { value: '/home/tester' } : { value: undefined }));
+    on('fs.read', async (_$: any, e: any) =>
+      (normalisePath(String(e.path)).endsWith('.claudefuscator/agent.json')
+        ? { value: JSON.stringify({ port: 8099, token: 'tok' }) }
+        : { deny: 'not found' }));
+    on('clock.sleep', async () => await new Promise(() => {}));
+    on('http.fetch', async () => ({
+      value: {
+        ok: true, status: 200, headers: {},
+        text: JSON.stringify({ key: KEY, config: BASE }),
+      },
+    }));
+    on('prompt.submit', async (_$: any, e: any) => e);
+
+    const result = await $.prompt.submit({ text: `ssh ${REAL_HOST}` });
+
+    /* The escape hatch from a sensitive field the UI cannot empty.
+     * Without it, somebody who once set a key and later moved to
+     * central mode is stuck with it and cannot tell why nothing
+     * resolves for their colleagues. */
+    expect(result.text).not.toContain(REAL_HOST);
+    expect(result.text).toMatch(/HOST_[0-9a-f]{8}/);
+  });
+
+test('a real secret_key is still used', { options: OPTIONS },
+  async ($, on) => {
+    // The sentinel must not swallow ordinary values.
+    serveConfig(on);
+    on('prompt.submit', async (_$: any, e: any) => e);
+
+    const result = await $.prompt.submit({ text: REAL_HOST });
+    expect(result.text).toMatch(/^HOST_[0-9a-f]{8}$/);
   });
